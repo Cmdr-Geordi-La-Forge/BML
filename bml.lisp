@@ -576,4 +576,4 @@
          (program `(begin ,@ast)))
     (compile-program program output-filepath)))
 
-(build-program "boot.lisp" "boot.asm")
+(build-program "boot.lisp" "boot.fasm")
