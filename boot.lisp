@@ -79,7 +79,7 @@
     (begin
       (print-line "format ELF64 executable 3")
       (print-line "segment readable executable")
-      (print-line "include 'runtime.fasm'")
+      (print-line "include 'runtime.asm'")
       (print-line "entry _start")
       (print-line "_start:")
       (print-line "  mov r14, 0")

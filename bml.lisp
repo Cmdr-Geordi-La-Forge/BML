@@ -546,7 +546,7 @@
     (with-open-file (out filepath :direction :output :if-exists :supersede)
       (format out "format ELF64 executable 3~%")
       (format out "segment readable executable~%")
-      (format out "include 'runtime.fasm'~%~%")
+      (format out "include 'runtime.asm'~%~%")
       
       (format out "entry _start~%")
       (format out "_start:~%")
