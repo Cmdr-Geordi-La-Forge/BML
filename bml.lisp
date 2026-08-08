@@ -472,10 +472,22 @@
               (format out "  ;; cond block~%")
               (loop for clause in clauses
                     for next-label = (string-left-trim "#:" (symbol-name (gensym "COND_NEXT_"))) do
-                    (format out "~a" (compile-expr (first clause) nil parent-arity))
+                    
+                    (if (eql (first clause) 1)
+                        (format out "  mov rax, 1~%")
+                        (format out "~a" (compile-expr (first clause) nil parent-arity)))
+                        
                     (format out "  test rax, rax~%")
                     (format out "  jz ~a~%" next-label)
-                    (format out "~a" (compile-expr (second clause) tail-p parent-arity))
+                    
+                    (let ((body (cdr clause)))
+                      (if (null body)
+                          (format out "  ;; implicit true return~%")
+                          (loop for rest on body
+                                for stmt = (car rest)
+                                for is-last = (null (cdr rest))
+                                do (format out "~a" (compile-expr stmt (if is-last tail-p nil) parent-arity)))))
+                                
                     (format out "  jmp ~a~%" end-label)
                     (format out "~a:~%" next-label))
               (format out "  mov rax, 0~%")
@@ -546,7 +558,7 @@
     (with-open-file (out filepath :direction :output :if-exists :supersede)
       (format out "format ELF64 executable 3~%")
       (format out "segment readable executable~%")
-      (format out "include 'runtime.fasm'~%~%")
+      (format out "include 'runtime.asm'~%~%")
       
       (format out "entry _start~%")
       (format out "_start:~%")
