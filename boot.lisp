@@ -1,6 +1,7 @@
 (let ((lookahead (cons 0 0))
       (label-counter (cons 0 0))
-      (compile-env (cons 0 0)))
+      (compile-env (cons 0 0))
+      (symbol-table (cons 0 0)))
   (let (
         ;; --- 1. I/O & Memory Safety ---
         (next-char (lambda () (let ((c (peek lookahead))) (if c (begin (poke lookahead 0) c) (read-char)))))
@@ -32,7 +33,8 @@
         (parse-list (lambda () (begin (skip-whitespace) (let ((c (next-char))) (if (or (eql c 41) (eql c 0)) 0 (begin (unget-char c) (cons (parse-expr) (parse-list))))))))
         (parse-expr (lambda () (begin (skip-whitespace) (let ((c (next-char))) (cond ((eql c 40) (cons 2 (parse-list))) ((eql c 34) (cons 3 (parse-string))) ((is-digit c) (begin (unget-char c) (cons 0 (parse-int 0)))) (1 (begin (unget-char c) (cons 1 (parse-symbol)))))))))
 
-        ;; --- 2.5 Compile-Time Macro Evaluator ---
+        ;; --- 2.5 Compile-Time Macro Evaluator & Interning ---
+        (lookup-symbol (lambda (str table) (if (eql table 0) 0 (let ((entry (safe-car table))) (if (string-eq str (safe-car entry)) (safe-cdr entry) (lookup-symbol str (safe-cdr table)))))))
         (lookup-macro (lambda (name env) (if (eql env 0) 0 (let ((binding (safe-car env))) (if (string-eq name (safe-car binding)) (safe-cdr binding) (lookup-macro name (safe-cdr env)))))))
         (bind-macro-args (lambda (params args env) (if params (cons (cons (safe-cdr (safe-car params)) (safe-car args)) (bind-macro-args (safe-cdr params) (safe-cdr args) env)) env)))
 
@@ -58,7 +60,17 @@
         ;; --- 3. The Code Generator ---
         (compile-number (lambda (val) (begin (print-string "  mov rax, ") (print-int val) (print-char 10))))
         (emit-sym-chunks (lambda (s id chunk-id) (if s (begin (print-string "SYM_") (print-int id) (print-string "_") (print-int chunk-id) (print-line ":") (print-string "  dq ") (print-int (safe-car s)) (print-char 10) (if (safe-cdr s) (begin (print-string "  dq SYM_") (print-int id) (print-string "_") (print-int (add chunk-id 1)) (print-char 10) (emit-sym-chunks (safe-cdr s) id (add chunk-id 1))) (print-line "  dq 0"))) 0)))
-        (emit-inline-symbol (lambda (str-chunks) (let ((id (get-id))) (begin (print-string "  jmp SYM_AFTER_") (print-int id) (print-char 10) (emit-sym-chunks str-chunks id 0) (print-string "SYM_AFTER_") (print-int id) (print-line ":") (print-string "  lea rdi, [SYM_") (print-int id) (print-line "_0]")))))
+        (emit-inline-symbol (lambda (str-chunks)
+          (let ((existing (lookup-symbol str-chunks (peek symbol-table))))
+            (if existing
+                (begin (print-string "  lea rdi, [SYM_") (print-int (safe-car existing)) (print-line "_0]"))
+                (let ((id (get-id)))
+                  (begin
+                    (poke symbol-table (cons (cons str-chunks (cons id 0)) (peek symbol-table)))
+                    (print-string "  jmp SYM_AFTER_") (print-int id) (print-char 10)
+                    (emit-sym-chunks str-chunks id 0)
+                    (print-string "SYM_AFTER_") (print-int id) (print-line ":")
+                    (print-string "  lea rdi, [SYM_") (print-int id) (print-line "_0]")))))))
 
         (count-bindings (lambda (bindings) (if bindings (add 1 (count-bindings (safe-cdr bindings))) 0)))
         (compile-binding (lambda (binding) (let ((binding-items (safe-cdr binding))) (let ((var-node (safe-car binding-items)) (val-node (safe-car (safe-cdr binding-items)))) (begin (compile-expr val-node) (emit-inline-symbol (safe-cdr var-node)) (print-line "  sub rsp, 32") (print-line "  mov [rsp], rdi") (print-line "  mov [rsp+8], rax") (print-line "  mov [rsp+16], rsp") (print-line "  mov [rsp+24], r14") (print-line "  lea r14, [rsp+16]"))))))
