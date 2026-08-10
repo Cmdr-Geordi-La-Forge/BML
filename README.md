@@ -1,6 +1,6 @@
 # Bare-Metal Lisp (BML)
 
-![Project Logo](./assets/logo.svg)
+![Project Logo](./assets/lambda-giraffe.svg)
 
 A completely self-hosting, dynamically-scoped Lisp compiler that targets raw x86-64 Linux assembly. Built from scratch in ~18 hours.
 
