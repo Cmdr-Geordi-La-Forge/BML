@@ -1,5 +1,7 @@
 # Bare-Metal Lisp (BML)
 
+![Project Logo](./assets/logo.svg)
+
 A completely self-hosting, dynamically-scoped Lisp compiler that targets raw x86-64 Linux assembly. Built from scratch in ~18 hours.
 
 Bare-Metal Lisp bypasses traditional C dependencies, LLVM IRs, and virtual machines. It is a single-pass compiler that reads Abstract Syntax Trees (AST) and instantly emits native `ELF64` FASM instructions. It features an untyped memory model where data, code, pointers, and booleans are mathematically unified.
