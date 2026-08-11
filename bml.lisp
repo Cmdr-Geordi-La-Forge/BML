@@ -1,7 +1,7 @@
 (defparameter *primitives*
   '( add  sub  mul  div   ; Integer math
     fadd fsub fmul fdiv   ; Float math (SSE)
-    cons car cdr          ; List/Env ops
+    cons                  ; List/Env ops
     print-int  print-hex print-char print-chunk
     peek poke
     alloc peek-idx poke-idx
@@ -119,8 +119,8 @@
 
 (defun compile-sse (out asm-op)
   "Helper for SSE floating point primitives. Writes directly to stream."
-  (format out "  movq xmm0, rcx~%")
-  (format out "  movq xmm1, rax~%")
+  (format out "  movq xmm0, rax~%")
+  (format out "  movq xmm1, rcx~%")
   ;; For fsub/fdiv, order matters: XMM0 (left) op XMM1 (right)
   (format out "  ~a xmm0, xmm1~%" asm-op)
   (format out "  movq rax, xmm0~%"))
@@ -135,12 +135,10 @@
          (format out "  call read_char~%"))
 
         ;; unary
-        ((member op '(car cdr print-int print-hex print-char print-chunk peek itof alloc))
+        ((member op '(print-int print-hex print-char print-chunk peek itof alloc))
          (format out "~a" (compile-expr (first args) comp-env nil parent-arity))
          (format out "  ;; inline ~a~%" op)
          (case op
-           (car         (format out "  mov rax, [rax]~%"))
-           (cdr         (format out "  mov rax, [rax+8]~%"))
            (peek        (format out "  mov rax, [rax]~%"))
            (alloc       (format out "  imul rax, 8~%")
                         (format out "  mov rcx, r15~%")
@@ -156,63 +154,108 @@
         ;; binary
         ((member op '(add sub mul div fadd fsub fmul fdiv cons poke eql lt gt
                       ash logand logior peek-idx))
-         (format out "~a" (compile-expr (first args) comp-env nil parent-arity))
-         (format out "  push rax~%")
-         (format out "~a" (compile-expr (second args) comp-env nil parent-arity))
-         (format out "  pop rcx~%")
-         (format out "  ;; inline ~a~%" op)
-         (case op
-           (peek-idx (format out "  mov rax, [rcx + rax*8]~%"))
-           (ash
-            (let ((lbl-left (string-left-trim "#:" (symbol-name (gensym "ASH_LEFT_"))))
-                  (lbl-done (string-left-trim "#:" (symbol-name (gensym "ASH_DONE_")))))
-              (format out "  test rax, rax~%")
-              (format out "  jns ~a~%" lbl-left)
-              (format out "  neg rax~%")
-              (format out "  xchg rax, rcx~%")
-              (format out "  sar rax, cl~%")
-              (format out "  jmp ~a~%" lbl-done)
-              (format out "~a:~%" lbl-left)
-              (format out "  xchg rax, rcx~%")
-              (format out "  shl rax, cl~%")
-              (format out "~a:~%" lbl-done)))
-           (logand (format out "  and rax, rcx~%"))
-           (logior (format out "  or rax, rcx~%"))
-           (eql
-            (format out "  cmp rcx, rax~%")
-            (format out "  mov rax, 0~%")
-            (format out "  sete al~%"))
-           (lt
-            (format out "  cmp rcx, rax~%")
-            (format out "  mov rax, 0~%")
-            (format out "  setl al~%"))
-           (gt
-            (format out "  cmp rcx, rax~%")
-            (format out "  mov rax, 0~%")
-            (format out "  setg al~%"))
-           (poke
-            (format out "  mov [rcx], rax~%"))
-           (cons
-            (format out "  mov [r15], rcx~%")
-            (format out "  mov [r15+8], rax~%")
-            (format out "  mov rax, r15~%")
-            (format out "  add r15, 16~%"))
-           (add
-            (format out "  add rax, rcx~%"))
-           (sub
-            (format out "  sub rcx, rax~%")
-            (format out "  mov rax, rcx~%"))
-           (mul
-            (format out "  imul rax, rcx~%"))
-           (div
-            (format out "  mov r8, rax~%")
-            (format out "  mov rax, rcx~%")
-            (format out "  cqo~%")
-            (format out "  idiv r8~%"))
-           (fadd (compile-sse out "addsd"))
-           (fsub (compile-sse out "subsd"))
-           (fmul (compile-sse out "mulsd"))
-           (fdiv (compile-sse out "divsd"))))
+         (let* ((arg1 (first args))
+                (arg2 (second args))
+                (arg2-int-p (integerp arg2))
+                (arg2-sym-p (symbolp arg2))
+                (arg2-binding (when arg2-sym-p (assoc arg2 comp-env)))
+                (arg2-loc (when arg2-binding (cdr arg2-binding)))
+                (arg2-local-p (numberp arg2-loc))
+                (is-optimizable-op (member op '(add sub mul logand logior ash))))
+
+           ;; Always evaluate arg1 into rax first
+           (format out "~a" (compile-expr arg1 comp-env nil parent-arity))
+
+           (flet ((fallback ()
+                    (format out "  push rax~%")
+                    (format out "~a" (compile-expr arg2 comp-env nil parent-arity))
+                    (format out "  mov rcx, rax~%")
+                    (format out "  pop rax~%")
+                    (format out "  ;; inline ~a~%" op)
+                    (case op
+                      (peek-idx (format out "  mov rax, [rax + rcx*8]~%"))
+                      (ash
+                       (let ((lbl-left (string-left-trim "#:" (symbol-name (gensym "ASH_LEFT_"))))
+                             (lbl-done (string-left-trim "#:" (symbol-name (gensym "ASH_DONE_")))))
+                         (format out "  test rcx, rcx~%")
+                         (format out "  jns ~a~%" lbl-left)
+                         (format out "  neg rcx~%")
+                         (format out "  sar rax, cl~%")
+                         (format out "  jmp ~a~%" lbl-done)
+                         (format out "~a:~%" lbl-left)
+                         (format out "  shl rax, cl~%")
+                         (format out "~a:~%" lbl-done)))
+                      (logand (format out "  and rax, rcx~%"))
+                      (logior (format out "  or rax, rcx~%"))
+                      (eql
+                       (format out "  cmp rax, rcx~%")
+                       (format out "  mov rax, 0~%")
+                       (format out "  sete al~%"))
+                      (lt
+                       (format out "  cmp rax, rcx~%")
+                       (format out "  mov rax, 0~%")
+                       (format out "  setl al~%"))
+                      (gt
+                       (format out "  cmp rax, rcx~%")
+                       (format out "  mov rax, 0~%")
+                       (format out "  setg al~%"))
+                      (poke
+                       (format out "  mov [rax], rcx~%"))
+                      (cons
+                       (format out "  mov [r15], rax~%")
+                       (format out "  mov [r15+8], rcx~%")
+                       (format out "  mov rax, r15~%")
+                       (format out "  add r15, 16~%"))
+                      (add
+                       (format out "  add rax, rcx~%"))
+                      (sub
+                       (format out "  sub rax, rcx~%"))
+                      (mul
+                       (format out "  imul rax, rcx~%"))
+                      (div
+                       (format out "  mov r8, rcx~%")
+                       (format out "  cqo~%")
+                       (format out "  idiv r8~%"))
+                      (fadd (compile-sse out "addsd"))
+                      (fsub (compile-sse out "subsd"))
+                      (fmul (compile-sse out "mulsd"))
+                      (fdiv (compile-sse out "divsd")))))
+
+             (cond
+               ;; Optimization 1: Immediate integer
+               ((and arg2-int-p is-optimizable-op)
+                (format out "  ;; inline immediate ~a~%" op)
+                (case op
+                  (add (format out "  add rax, ~a~%" arg2))
+                  (sub (format out "  sub rax, ~a~%" arg2))
+                  (mul (format out "  imul rax, ~a~%" arg2))
+                  (logand (format out "  and rax, ~a~%" arg2))
+                  (logior (format out "  or rax, ~a~%" arg2))
+                  (ash (if (>= arg2 0)
+                           (format out "  shl rax, ~a~%" arg2)
+                           (format out "  sar rax, ~a~%" (- arg2))))))
+
+               ;; Optimization 2: Local variable / Argument
+               ((and arg2-local-p is-optimizable-op)
+                (if (eq op 'ash)
+                    ;; x86 'shl/sar' does not accept memory operands for the shift amount!
+                    ;; Shift amount must be an immediate or in the CL register. 
+                    (fallback)
+                    (progn
+                      (format out "  ;; inline local ~a~%" op)
+                      (track-symbol arg2)
+                      (let ((mem-op (if (> arg2-loc 0)
+                                        (format nil "[rbp + ~a]" arg2-loc)
+                                        (format nil "[rbp - ~a]" (- arg2-loc)))))
+                        (case op
+                          (add (format out "  add rax, ~a~%" mem-op))
+                          (sub (format out "  sub rax, ~a~%" mem-op))
+                          (mul (format out "  imul rax, ~a~%" mem-op))
+                          (logand (format out "  and rax, ~a~%" mem-op))
+                          (logior (format out "  or rax, ~a~%" mem-op)))))))
+
+               ;; Fallback: Lists, Strings, Globals, Non-optimizable ops
+               (t (fallback))))))
 
         ;; tertiary
         ((member op '(poke-idx))
@@ -420,6 +463,32 @@
             (format out "  jmp rax~%"))
           (format out "  call rax~%")))))
 
+(defun is-cadr-sym (sym)
+  "Checks if a symbol matches the c[ad]+r pattern."
+  (let* ((s (string-downcase (symbol-name sym)))
+         (len (length s)))
+    (and (>= len 3)
+         (char= (char s 0) #\c)
+         (char= (char s (1- len)) #\r)
+         (loop for i from 1 to (- len 2)
+               always (let ((c (char s i)))
+                        (or (char= c #\a) (char= c #\d)))))))
+
+(defun compile-cadr (expr comp-env parent-arity)
+  "Dynamically chains mov dereferences for any valid c*r sequence."
+  (let* ((op (car expr))
+         (arg (second expr))
+         (s (string-downcase (symbol-name op))))
+    (with-output-to-string (out)
+      (format out "~a" (compile-expr arg comp-env nil parent-arity))
+      (format out "  ;; inline ~a~%" op)
+      ;; We iterate backwards to evaluate right-to-left!
+      (loop for i from (- (length s) 2) downto 1
+            for c = (char s i)
+            do (case c
+                 (#\a (format out "  mov rax, [rax]~%"))
+                 (#\d (format out "  mov rax, [rax+8]~%")))))))
+
 (defun compile-expr (expr comp-env &optional tail-p parent-arity)
   "Translates a single S-expression. Tracks tail position and parent arity for TCE."
   (cond
@@ -532,6 +601,10 @@
          ;; 7. Inline Primitives
          ((and (symbolp head) (member head *primitives*))
           (compile-inline-primitive expr comp-env parent-arity))
+
+         ;; 7.5 Dynamic c[ad]+r
+         ((and (symbolp head) (is-cadr-sym head))
+          (compile-cadr expr comp-env parent-arity))
 
          ;; 8. Standard Function Application
          (t
