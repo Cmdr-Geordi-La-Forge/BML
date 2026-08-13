@@ -7,7 +7,8 @@
     alloc peek-idx poke-idx
     eql lt gt
     read-char itof
-    ash logand logior
+    and or
+    ash logand logior not
     get-heap set-heap poke-byte)
   "Standard assembly mnemonics mapping 1-to-1 with hardware instructions.")
 
@@ -28,22 +29,25 @@
             (current-asm nil))
         (loop for line = (read-line in nil nil)
               while line do
-              (when (> (length line) 0)
+              ;; Ensure line is not empty AND does not start with a comment ';'
+              (when (and (> (length line) 0) 
+                         (not (char= (char line 0) #\;)))
                 (if (char= (char line 0) #\Tab)
                     ;; It is a tabbed instruction
                     (when current-op
                       (push (format nil "  ~a~%" (string-trim '(#\Tab #\Space #\Return) line)) current-asm))
                     ;; It is a new label definition
-                    (let* ((colon-pos (position #\: line))
-                           (op-str (subseq line 0 colon-pos))
-                           (rest-str (subseq line (1+ colon-pos))))
-                      (when current-op
-                        (push (cons current-op (reverse current-asm)) *primitives-asm*))
-                      (setf current-op (intern (string-upcase op-str)))
-                      (setf current-asm nil)
-                      (let ((trimmed-rest (string-trim '(#\Tab #\Space #\Return) rest-str)))
-                        (when (> (length trimmed-rest) 0)
-                          (push (format nil "  ~a~%" trimmed-rest) current-asm)))))))
+                    (let ((colon-pos (position #\: line)))
+                      (when colon-pos ; Ensure the colon actually exists
+                        (let* ((op-str (subseq line 0 colon-pos))
+                               (rest-str (subseq line (1+ colon-pos))))
+                          (when current-op
+                            (push (cons current-op (reverse current-asm)) *primitives-asm*))
+                          (setf current-op (intern (string-upcase op-str)))
+                          (setf current-asm nil)
+                          (let ((trimmed-rest (string-trim '(#\Tab #\Space #\Return) rest-str)))
+                            (when (> (length trimmed-rest) 0)
+                              (push (format nil "  ~a~%" trimmed-rest) current-asm)))))))))
         (when current-op
           (push (cons current-op (reverse current-asm)) *primitives-asm*))))))
 
@@ -145,61 +149,41 @@
       ;; 3. Return ONLY the pointer load to the caller!
       (format nil "  lea rax, [~a]~%" start-label))))
 
-(defun compile-sse (out asm-op)
-  "Helper for SSE floating point primitives. Writes directly to stream."
-  (format out "  movq xmm0, rax~%")
-  (format out "  movq xmm1, rcx~%")
-  ;; For fsub/fdiv, order matters: XMM0 (left) op XMM1 (right)
-  (format out "  ~a xmm0, xmm1~%" asm-op)
-  (format out "  movq rax, xmm0~%"))
-
 (defun compile-inline-primitive (expr comp-env parent-arity)
   (let ((op (car expr))
         (args (cdr expr)))
     (with-output-to-string (out)
-      (cond
-        ;; nullary
-        ((eq op 'read-char)
-         (format out "  ;; inline read-char~%")
-         (format out "  call read_char~%"))
-        ((eq op 'get-heap)
-         (format out "  ;; inline get-heap~%")
-         (format out "  mov rax, r15~%"))
+      (flet ((emit-template (&optional suffix arg)
+               (let* ((key-str (if suffix (format nil "~a_~a" (string-downcase (symbol-name op)) suffix) (string-downcase (symbol-name op))))
+                      (key-sym (intern (string-upcase key-str)))
+                      (template (assoc key-sym *primitives-asm*)))
+                 (when template
+                   (if suffix (format out "  ;; inline optimized ~a~%" key-str)
+                              (format out "  ;; inline ~a~%" op))
+                   (dolist (ins (cdr template))
+                     (let ((pos (search "%1" ins)))
+                       (if pos
+                           (format out "~a~a~a" (subseq ins 0 pos) arg (subseq ins (+ pos 2)))
+                           (format out "~a" ins))))
+                   t)))) ; Returns T on success, NIL on failure
 
-        ;; unary
-        ((member op '(print-int print-hex print-char print-chunk peek itof alloc
-                      set-heap))
-         (format out "~a" (compile-expr (first args) comp-env nil parent-arity))
-         (format out "  ;; inline ~a~%" op)
-         (case op
-           (peek        (format out "  mov rax, [rax]~%"))
-           (alloc       (format out "  imul rax, 8~%")
-                        (format out "  mov rcx, r15~%")
-                        (format out "  add r15, rax~%")
-                        (format out "  mov rax, rcx~%"))
-           (itof        (format out "  cvtsi2sd xmm0, rax~%")
-                        (format out "  movq rax, xmm0~%"))
-           (print-int   (format out "  call print_int~%"))
-           (print-hex   (format out "  call print_hex~%"))
-           (print-char  (format out "  call print_char~%"))
-           (print-chunk (format out "  call print_chunk~%"))
-           (set-heap    (format out "  mov r15, rax~%"))))
+        (cond
+          ;; nullary
+          ((member op '(read-char get-heap))
+           (or (emit-template) (error "Missing template for ~a" op)))
 
-        ;; binary
-        ;; 1. Variadic Math & Logic
-        ((member op '(add sub mul div fadd fsub fmul fdiv logand logior))
-         (let ((is-optimizable-op (member op '(add sub mul logand logior))))
-           
-           ;; Handle zero-argument edge cases (e.g. (+), (*))
+          ;; unary
+          ((member op '(print-int print-hex print-char print-chunk peek itof alloc set-heap not))
+           (format out "~a" (compile-expr (first args) comp-env nil parent-arity))
+           (or (emit-template) (error "Missing template for ~a" op)))
+
+          ;; binary
+          ;; 1. Variadic Math & Logic
+          ((member op '(add sub mul div fadd fsub fmul fdiv logior or logand and))
            (if (null args)
-               (if (member op '(mul fmul))
-                   (format out "  mov rax, 1~%")
-                   (format out "  mov rax, 0~%"))
+               (if (member op '(mul fmul)) (format out "  mov rax, 1~%") (format out "  mov rax, 0~%"))
                (progn
-                 ;; Evaluate the first argument to initialize the RAX accumulator
                  (format out "~a" (compile-expr (first args) comp-env nil parent-arity))
-                 
-                 ;; Iteratively fold the remaining arguments into RAX
                  (loop for arg2 in (cdr args)
                        for arg2-int-p = (integerp arg2)
                        for arg2-sym-p = (symbolp arg2)
@@ -212,132 +196,62 @@
                                 (format out "~a" (compile-expr arg2 comp-env nil parent-arity))
                                 (format out "  mov rcx, rax~%")
                                 (format out "  pop rax~%")
-                                (format out "  ;; inline variadic ~a~%" op)
-                                (let ((template (assoc op *primitives-asm*)))
-                                  (if template
-                                      (dolist (ins (cdr template))
-                                        (format out "~a" ins))
-                                      (case op
-                                        (logand (format out "  and rax, rcx~%"))
-                                        (logior (format out "  or rax, rcx~%"))
-                                        (add    (format out "  add rax, rcx~%"))
-                                        (sub    (format out "  sub rax, rcx~%"))
-                                        (mul    (format out "  imul rax, rcx~%"))
-                                        (div    (format out "  mov r8, rcx~%")
-                                                (format out "  cqo~%")
-                                                (format out "  idiv r8~%"))
-                                        (fadd   (compile-sse out "addsd"))
-                                        (fsub   (compile-sse out "subsd"))
-                                        (fmul   (compile-sse out "mulsd"))
-                                        (fdiv   (compile-sse out "divsd")))))))
+                                (or (emit-template) (error "Missing template for ~a" op))))
                          (cond
                            ;; Optimization 1: Immediate integer
-                           ((and arg2-int-p is-optimizable-op)
-                            (format out "  ;; inline immediate ~a~%" op)
-                            (case op
-                              (add    (format out "  add rax, ~a~%" arg2))
-                              (sub    (format out "  sub rax, ~a~%" arg2))
-                              (mul    (format out "  imul rax, ~a~%" arg2))
-                              (logand (format out "  and rax, ~a~%" arg2))
-                              (logior (format out "  or rax, ~a~%" arg2))))
+                           ((and arg2-int-p (emit-template "imm" arg2)))
 
                            ;; Optimization 2: Local variable / Argument
-                           ((and arg2-local-p is-optimizable-op)
-                            (format out "  ;; inline local ~a~%" op)
-                            (track-symbol arg2)
-                            (let ((mem-op (if (> arg2-loc 0)
-                                              (format nil "[rbp + ~a]" arg2-loc)
-                                              (format nil "[rbp - ~a]" (- arg2-loc)))))
-                              (case op
-                                (add    (format out "  add rax, ~a~%" mem-op))
-                                (sub    (format out "  sub rax, ~a~%" mem-op))
-                                (mul    (format out "  imul rax, ~a~%" mem-op))
-                                (logand (format out "  and rax, ~a~%" mem-op))
-                                (logior (format out "  or rax, ~a~%" mem-op)))))
+                           ((and arg2-local-p 
+                                 (if (> arg2-loc 0) (emit-template "arg" arg2-loc)
+                                                    (emit-template "local" (- arg2-loc))))
+                            (track-symbol arg2))
 
                            ;; Fallback
-                           (t (fallback)))))))))
+                           (t (fallback))))))))
 
-        ;; 2. Strict Binary (Memory ops, Shifts, Comparisons)
-        ((member op '(cons poke eql lt gt ash peek-idx poke-byte))
-         (let* ((arg1 (first args))
-                (arg2 (second args))
-                (arg2-int-p (integerp arg2))
-                (is-optimizable-op (eq op 'ash))) 
+          ;; 2. Strict Binary
+          ((member op '(cons poke eql lt gt ash peek-idx poke-byte))
+           (let* ((arg1 (first args))
+                  (arg2 (second args))
+                  (arg2-int-p (integerp arg2)))
+             (format out "~a" (compile-expr arg1 comp-env nil parent-arity))
+             (flet ((fallback ()
+                      (format out "  push rax~%")
+                      (format out "~a" (compile-expr arg2 comp-env nil parent-arity))
+                      (format out "  mov rcx, rax~%")
+                      (format out "  pop rax~%")
+                      (if (eq op 'ash)
+                          (let ((lbl-left (string-left-trim "#:" (symbol-name (gensym "ASH_LEFT_"))))
+                                (lbl-done (string-left-trim "#:" (symbol-name (gensym "ASH_DONE_")))))
+                            (format out "  test rcx, rcx~%")
+                            (format out "  jns ~a~%" lbl-left)
+                            (format out "  neg rcx~%")
+                            (format out "  sar rax, cl~%")
+                            (format out "  jmp ~a~%" lbl-done)
+                            (format out "~a:~%" lbl-left)
+                            (format out "  shl rax, cl~%")
+                            (format out "~a:~%" lbl-done))
+                          (or (emit-template) (error "Missing template for ~a" op)))))
+               (cond
+                 ;; Unique check for 'ash' dynamic branches
+                 ((and arg2-int-p (eq op 'ash))
+                  (if (>= arg2 0) (emit-template "left_imm" arg2)
+                                  (emit-template "right_imm" (- arg2))))
+                 (t (fallback))))))
 
-           ;; Always evaluate arg1 into rax first
-           (format out "~a" (compile-expr arg1 comp-env nil parent-arity))
+          ;; tertiary
+          ((member op '(poke-idx))
+           (format out "~a" (compile-expr (first args) comp-env nil parent-arity))
+           (format out "  push rax~%")
+           (format out "~a" (compile-expr (second args) comp-env nil parent-arity))
+           (format out "  push rax~%")
+           (format out "~a" (compile-expr (third args) comp-env nil parent-arity))
+           (format out "  pop rcx~%")
+           (format out "  pop r8~%")
+           (or (emit-template) (error "Missing template for ~a" op)))
 
-           (flet ((fallback ()
-                    (format out "  push rax~%")
-                    (format out "~a" (compile-expr arg2 comp-env nil parent-arity))
-                    (format out "  mov rcx, rax~%")
-                    (format out "  pop rax~%")
-                    (format out "  ;; inline strict ~a~%" op)
-                    (let ((template (assoc op *primitives-asm*)))
-                      (if template
-                          (dolist (ins (cdr template))
-                            (format out "~a" ins))
-                          (case op
-                            (peek-idx (format out "  mov rax, [rax + rcx*8]~%"))
-                            (ash
-                             (let ((lbl-left (string-left-trim "#:" (symbol-name (gensym "ASH_LEFT_"))))
-                                   (lbl-done (string-left-trim "#:" (symbol-name (gensym "ASH_DONE_")))))
-                               (format out "  test rcx, rcx~%")
-                               (format out "  jns ~a~%" lbl-left)
-                               (format out "  neg rcx~%")
-                               (format out "  sar rax, cl~%")
-                               (format out "  jmp ~a~%" lbl-done)
-                               (format out "~a:~%" lbl-left)
-                               (format out "  shl rax, cl~%")
-                               (format out "~a:~%" lbl-done)))
-                            (eql
-                             (format out "  cmp rax, rcx~%")
-                             (format out "  mov rax, 0~%")
-                             (format out "  sete al~%"))
-                            (lt
-                             (format out "  cmp rax, rcx~%")
-                             (format out "  mov rax, 0~%")
-                             (format out "  setl al~%"))
-                            (gt
-                             (format out "  cmp rax, rcx~%")
-                             (format out "  mov rax, 0~%")
-                             (format out "  setg al~%"))
-                            (poke
-                             (format out "  mov [rax], rcx~%"))
-                            (cons
-                             (format out "  mov [r15], rax~%")
-                             (format out "  mov [r15+8], rcx~%")
-                             (format out "  mov rax, r15~%")
-                             (format out "  add r15, 16~%"))
-                            (poke-byte
-                             (format out "  mov [rax], cl~%")))))))
-             (cond
-               ;; Optimization: Immediate integer (Only valid for ash in this list)
-               ((and arg2-int-p is-optimizable-op)
-                (format out "  ;; inline immediate ~a~%" op)
-                (case op
-                  (ash (if (>= arg2 0)
-                           (format out "  shl rax, ~a~%" arg2)
-                           (format out "  sar rax, ~a~%" (- arg2))))))
-
-               ;; Fallback
-               (t (fallback))))))
-
-        ;; tertiary
-        ((member op '(poke-idx))
-         (format out "~a" (compile-expr (first  args) comp-env nil parent-arity))
-         (format out "  push rax~%")
-         (format out "~a" (compile-expr (second args) comp-env nil parent-arity))
-         (format out "  push rax~%")
-         (format out "~a" (compile-expr (third  args) comp-env nil parent-arity))
-         (format out "  pop rcx~%")
-         (format out "  pop r8~%")
-         (format out "  ;; inline ~a~%" op)
-         (case op
-           (poke-idx (format out "  mov [r8 + rcx*8], rax~%"))))
-           
-        (t (error "Unsupported primitive: ~a" op))))))
+          (t (error "Unsupported primitive: ~a" op)))))))
 
 (defun compile-string-literal (expr)
   "Evaluates to the pointer of a statically allocated string list."
@@ -408,21 +322,29 @@
                     (loop for i from 0 below (length str) collect (char-code (char str i)))))
          (len (length bytes)))
     (format out "align 8~%")
-    (format out "~a:~%" label)
-    (format out "  dq ~a_data~%" label)
-    (format out "  dq ~a~%" len)
+    ;; Tighter header formatting
+    (format out "~a: dq ~a_data, ~a~%" label label len)
     (format out "~a_data:~%" label)
     (when (> len 0)
       (format out "  db ")
-      (loop for i from 0 below len
-            for byte in bytes do
-            (if (and (>= byte 32) (<= byte 126) (/= byte 39))
-                (format out "'~a'" (code-char byte))
-                (format out "~a" byte))
-            (if (= i (1- len))
-                (format out "~%")
-                (format out ", "))))
-    (format out "  align 8~%")))
+      (let ((state 0)) ; 0=start, 1=in-str, 2=out-str
+        (loop for byte in bytes do
+              ;; ASCII 34 is the double quote ("). We treat it as non-printable 
+              ;; so it safely prints as an int without breaking our string literal!
+              (let ((is-printable (and (>= byte 32) (<= byte 126) (/= byte 34))))
+                (if is-printable
+                    (case state
+                      (0 (format out "\"~a" (code-char byte)) (setf state 1))
+                      (1 (format out "~a" (code-char byte)))
+                      (2 (format out ", \"~a" (code-char byte)) (setf state 1)))
+                    (case state
+                      (0 (format out "~a" byte) (setf state 2))
+                      (1 (format out "\", ~a" byte) (setf state 2))
+                      (2 (format out ", ~a" byte))))))
+        ;; Close the quote if we ended while inside a string
+        (when (= state 1)
+          (format out "\"")))
+      (format out "~%"))))
 
 (defun expand-macro (expr)
   "Expands syntactic sugar down into our native special forms."
@@ -430,18 +352,6 @@
       expr
       (let ((head (car expr)))
         (case head
-          ;; (not a) -> (if a 0 1)
-          (not `(if ,(expand-macro (second expr)) 0 1))
-
-          ;; (and a b) -> (if a b 0)
-          (and `(if ,(expand-macro (second expr)) ,(expand-macro (third expr)) 0))
-
-          ;; (or a b) -> (let ((tmp a)) (if tmp tmp b))
-          (or
-           (let ((tmp (gensym "OR_")))
-             (expand-macro
-              `(let ((,tmp ,(second expr)))
-                 (if ,tmp ,tmp ,(third expr))))))
 
           ;; (le a b) -> (not (gt a b)) -> (if (gt a b) 0 1)
           (le `(if (gt ,(expand-macro (second expr)) ,(expand-macro (third expr))) 0 1))

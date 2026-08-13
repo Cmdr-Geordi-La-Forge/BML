@@ -1,10 +1,11 @@
-(let ((lookahead (cons 0 0))
-      (label-counter (cons 0 0))
-      (compile-env (cons 0 0))
-      (symbol-table (cons 0 0))
-      (global-table (cons 0 0))
-      (string-table (cons 0 0))
-      (hoisted-lambdas (cons 0 0))
+(let ((lookahead         (cons 0 0))
+      (label-counter     (cons 0 0))
+      (compile-env       (cons 0 0))
+      (symbol-table      (cons 0 0))
+      (global-table      (cons 0 0))
+      (string-table      (cons 0 0))
+      (hoisted-lambdas   (cons 0 0))
+      (global-primitives (cons 0 0))
 
       ;; --- 1. I/O & Memory Safety ---
       (next-char (lambda () (let ((c (peek lookahead))) (cond (c (poke lookahead 0) c) (1 (read-char))))))
@@ -22,7 +23,42 @@
 
       (print-string (lambda (s) (syscall 1 1 (safe-car s) (safe-cdr s))))
       (print-line (lambda (s) (print-string s) (print-char 10)))
-      ;; --- Replaced String Comparison ---
+
+      (concat-string (lambda (s1 s2)
+        (let ((len1 (safe-cdr s1))
+              (len2 (safe-cdr s2)))
+          (let ((total-len (add len1 len2)))
+            (let ((aligned (mul (div (add total-len 8) 8) 8)))
+              (let ((ptr (get-heap)))
+                (alloc (div aligned 8))
+                (copy-bytes (safe-car s1) ptr len1)
+                (copy-bytes (safe-car s2) (add ptr len1) len2)
+                (cons ptr total-len)))))))
+
+      (print-template-loop (lambda (ptr len arg)
+        (cond
+          ((le len 0) 0)
+          (1 (let ((c (logand (peek ptr) 255)))
+               (cond
+                 ((and (eql c 37) (gt len 1)) ; Check for '%'
+                  (let ((next-c (logand (peek (add ptr 1)) 255)))
+                    (cond
+                      ((eql next-c 49) ; Check for '1'
+                       (print-int arg) ; Substitute!
+                       (print-template-loop (add ptr 2) (sub len 2) arg))
+                      (1 (print-char c) (print-template-loop (add ptr 1) (sub len 1) arg)))))
+                 (1 (print-char c) (print-template-loop (add ptr 1) (sub len 1) arg))))))))
+
+      (try-emit-opt (lambda (op-name suffix arg)
+        (let ((full-name (concat-string op-name suffix)))
+          (let ((asm (lookup-symbol full-name (peek global-primitives))))
+            (cond
+              (asm 
+               (print-string "  ;; inline optimized ") (print-line full-name)
+               (print-template-loop (safe-car asm) (safe-cdr asm) arg) 
+               1) ; Return 1 on success
+              (1 0)))))) ; Return 0 on failure
+      
       (string-eq-byte-loop (lambda (ptr1 ptr2 len idx)
         (cond 
           ;; If we reached the length without failing, they match!
@@ -94,6 +130,103 @@
       (parse-list (lambda () (skip-whitespace) (let ((c (next-char))) (cond ((or (eql c 41) (eql c 0)) 0) (1 (unget-char c) (cons (parse-expr) (parse-list)))))))
       (parse-expr (lambda () (skip-whitespace) (let ((c (next-char))) (cond ((eql c 40) (cons 2 (parse-list))) ((eql c 34) (cons 3 (parse-string))) ((is-digit c) (unget-char c) (cons 0 (parse-int 0))) ((eql c 45) (cons 0 (sub 0 (parse-int 0)))) (1 (unget-char c) (cons 1 (parse-symbol)))))))
 
+      ;; --- Dynamic Primitive Loading ---
+
+      (copy-bytes (lambda (src dst len)
+        (cond ((gt len 0)
+               (poke-byte dst (logand (peek src) 255))
+               (copy-bytes (add src 1) (add dst 1) (sub len 1)))
+              (1 0))))
+
+      (null-terminate (lambda (s)
+        (let ((len (safe-cdr s))
+              (ptr (get-heap)))
+          (alloc (add (div len 8) 1))
+          (copy-bytes (safe-car s) ptr len)
+          (poke-byte (add ptr len) 0)
+          ptr)))
+
+      (read-file (lambda (filename)
+        (let ((ptr (null-terminate filename)))
+          (let ((fd (syscall 2 ptr 0 0))) ; sys_open (fd = 2)
+            (cond
+              ((lt fd 0) 0)
+              (1
+               (let ((buf (get-heap)))
+                 ;; sys_read (fd = 0), load up to 64KB
+                 (let ((bytes-read (syscall 0 fd buf 65536)))
+                   (syscall 3 fd) ; sys_close (fd = 3)
+                   
+                   ;; --- EOF SANITIZATION ---
+                   ;; Unconditionally append a newline byte at the EOF memory address
+                   (poke-byte (add buf bytes-read) 10)
+                   
+                   (let ((safe-len (add bytes-read 1)))
+                     ;; Commit the allocation including our extra byte
+                     (alloc (add (div safe-len 8) 1))
+                     (cons buf safe-len))))))))))
+
+      (find-char (lambda (ptr end c)
+        (cond ((ge ptr end) 0)
+              ((eql (logand (peek ptr) 255) c) ptr)
+              (1 (find-char (add ptr 1) end c)))))
+
+      (find-body-end (lambda (ptr end)
+        (cond
+          ((ge ptr end) end)
+          ((eql (logand (peek ptr) 255) 10) ; Check for newline
+           (let ((next-ptr (add ptr 1)))
+             (cond
+               ((ge next-ptr end) next-ptr)
+               (1 (let ((next-c (logand (peek next-ptr) 255)))
+                    (cond
+                      ;; If next line starts with \t, space, or \n, body continues
+                      ((or (eql next-c 9) (or (eql next-c 32) (eql next-c 10)))
+                       (find-body-end next-ptr end))
+                      (1 next-ptr)))))))
+          (1 (find-body-end (add ptr 1) end)))))
+
+      (parse-primitives-loop (lambda (ptr end primitives)
+        (cond
+          ((ge ptr end) primitives)
+          (1
+           (let ((c (logand (peek ptr) 255)))
+             (cond
+               ;; 1. Skip comment lines (';' is ASCII 59)
+               ((eql c 59)
+                (let ((nl-pos (find-char ptr end 10)))
+                  (cond ((eql nl-pos 0) primitives)
+                        (1 (parse-primitives-loop (add nl-pos 1) end primitives)))))
+               
+               ;; 2. Skip empty lines / carriage returns
+               ((or (eql c 10) (eql c 13))
+                (parse-primitives-loop (add ptr 1) end primitives))
+               
+               ;; 3. Parse actual label and body
+               (1
+                (let ((colon-pos (find-char ptr end 58))) ; Find ':'
+                  (cond
+                    ((eql colon-pos 0) primitives)
+                    (1
+                     (let ((label-len (sub colon-pos ptr)))
+                       (let ((label-str (cons ptr label-len)))
+                         (let ((body-start (add colon-pos 1)))
+                           (let ((body-end (find-body-end body-start end)))
+                             ;; Slice the string out of the read buffer!
+                             (let ((body-str (cons body-start (sub body-end body-start))))
+                               (let ((new-primitives (cons (cons label-str body-str) primitives)))
+                                 (parse-primitives-loop body-end end new-primitives)))))))))))))))))
+
+      (load-primitives (lambda (filename)
+        (let ((file-data (read-file filename)))
+          (cond
+            (file-data
+             (poke global-primitives 
+                   (parse-primitives-loop (safe-car file-data) 
+                                          (add (safe-car file-data) (safe-cdr file-data)) 
+                                          0)))
+            (1 (print-line "Error: Could not load primitives.asm"))))))
+
       ;; --- 2.5 Compile-Time Environment ---
       (lookup-symbol (lambda (str table) (cond ((eql table 0) 0) (1 (let ((entry (safe-car table))) (cond ((string-eq str (safe-car entry)) (safe-cdr entry)) (1 (lookup-symbol str (safe-cdr table)))))))))
       (lookup-macro (lambda (name env) (cond ((eql env 0) 0) (1 (let ((binding (safe-car env))) (cond ((string-eq name (safe-car binding)) (safe-cdr binding)) (1 (lookup-macro name (safe-cdr env)))))))))
@@ -149,26 +282,42 @@
 
       ;; --- DATA SECTION EMITTERS ---
       
-      (emit-contiguous-loop (lambda (ptr len)
+      (emit-contiguous-loop (lambda (ptr len state)
         (cond
           ((gt len 0)
-           (print-int (logand (peek ptr) 255))
-           (cond ((gt len 1) (print-string ", ")) (1 0))
-           (emit-contiguous-loop (add ptr 1) (sub len 1)))
-          (1 0))))
+           (let ((b (logand (peek ptr) 255)))
+             (let ((is-printable (and (ge b 32) (and (le b 126) (not (eql b 34))))))
+               (cond
+                 (is-printable
+                  (cond
+                    ((eql state 0) (print-char 34) (print-char b) (emit-contiguous-loop (add ptr 1) (sub len 1) 1))
+                    ((eql state 1) (print-char b) (emit-contiguous-loop (add ptr 1) (sub len 1) 1))
+                    ((eql state 2) (print-string ", ") (print-char 34) (print-char b) (emit-contiguous-loop (add ptr 1) (sub len 1) 1))
+                    (1 0)))
+                 (1
+                  (cond
+                    ((eql state 0) (print-int b) (emit-contiguous-loop (add ptr 1) (sub len 1) 2))
+                    ((eql state 1) (print-char 34) (print-string ", ") (print-int b) (emit-contiguous-loop (add ptr 1) (sub len 1) 2))
+                    ((eql state 2) (print-string ", ") (print-int b) (emit-contiguous-loop (add ptr 1) (sub len 1) 2))
+                    (1 0)))))))
+          (1 
+           ;; Close the quote if we reached the end of the string
+           (cond ((eql state 1) (print-char 34)) (1 0))))))
 
       (emit-contiguous-data (lambda (prefix id val)
         (print-line "align 8")
-        (print-string prefix) (print-int id) (print-line ":")
-        (print-string "  dq ") (print-string prefix) (print-int id) (print-line "_data")
-        (print-string "  dq ") (print-int (safe-cdr val)) (print-char 10)
+        ;; Squashed dq formatting
+        (print-string prefix) (print-int id) (print-string ": dq ")
+        (print-string prefix) (print-int id) (print-string "_data, ")
+        (print-int (safe-cdr val)) (print-char 10)
+        
         (print-string prefix) (print-int id) (print-line "_data:")
         (cond ((gt (safe-cdr val) 0)
                (print-string "  db ")
-               (emit-contiguous-loop (safe-car val) (safe-cdr val))
+               ;; Start the state machine at state 0
+               (emit-contiguous-loop (safe-car val) (safe-cdr val) 0)
                (print-char 10))
-              (1 0))
-        (print-line "  align 8")))
+              (1 0))))
 
       (emit-all-symbols (lambda (table)
         (cond
@@ -427,6 +576,7 @@
               ((string-eq s "set-heap") 1)
               ((string-eq s "car") 1)
               ((string-eq s "cdr") 1)
+              ((string-eq s "not") 1)
               (1 0))))
 
       (is-variadic-math (lambda (s)
@@ -452,24 +602,61 @@
               ((string-eq s "cons") 1)
               ((string-eq s "ash") 1) ; ash is now handled generically here!
               (1 0))))
+
+      (compile-variadic-loop (lambda (op-name args comp-env parent-arity)
+        (cond
+          (args
+           (let ((next-arg (safe-car args)))
+             (let ((tag2 (safe-car next-arg))
+                   (val2 (safe-cdr next-arg)))
+               (cond
+                 ;; --- OPTIMIZATION 1: Immediate Integer ---
+                 ((eql tag2 0)
+                  (cond
+                    ((string-eq op-name "ash")
+                     (cond ((ge val2 0) (try-emit-opt op-name "_left_imm" val2))
+                           (1 (try-emit-opt op-name "_right_imm" (sub 0 val2)))))
+                    ;; Blindly try to emit the optimization. If it doesn't exist, fallback.
+                    ((try-emit-opt op-name "_imm" val2) 1) 
+                    (1 (compile-binary-fallback op-name next-arg comp-env parent-arity))))
+
+                 ;; --- OPTIMIZATION 2: Variables ---
+                 ((eql tag2 1)
+                  (let ((offset (lookup-env val2 comp-env)))
+                    (cond
+                      ((lt offset 0) ; Local
+                       (cond ((try-emit-opt op-name "_local" (sub 0 offset)) 1)
+                             (1 (compile-binary-fallback op-name next-arg comp-env parent-arity))))
+                      ((gt offset 0) ; Arg
+                       (cond ((try-emit-opt op-name "_arg" offset) 1)
+                             (1 (compile-binary-fallback op-name next-arg comp-env parent-arity))))
+                      (1 (compile-binary-fallback op-name next-arg comp-env parent-arity)))))
+                 
+                 ;; --- FALLBACK ---
+                 (1 (compile-binary-fallback op-name next-arg comp-env parent-arity)))))
+           (compile-variadic-loop op-name (safe-cdr args) comp-env parent-arity))
+          (1 0))))
       
+      (compile-primitive-variadic (lambda (op-name args comp-env parent-arity)
+        (cond
+          (args
+           (compile-expr (safe-car args) comp-env 0 parent-arity)
+           (compile-variadic-loop op-name (safe-cdr args) comp-env parent-arity))
+          (1 
+           (cond
+             ((string-eq op-name "mul") (print-line "  mov rax, 1"))
+             (1 (print-line "  mov rax, 0")))))))
+
       (compile-primitive-nullary (lambda (op-name) 
         (print-string "  ;; inline ") (print-string op-name) (print-char 10)
-        (cond ((string-eq op-name "read-char") (print-line "  call read_char"))
-              ((string-eq op-name "get-heap")  (print-line "  mov rax, r15"))
-              (1 0))))
+        (let ((asm (lookup-symbol op-name (peek global-primitives))))
+          (cond (asm (print-string asm)) (1 0)))))
 
       (compile-primitive-unary (lambda (op-name arg comp-env parent-arity) 
         (compile-expr arg comp-env 0 parent-arity) 
         (print-string "  ;; inline ") (print-string op-name) (print-char 10)
-        (cond ((string-eq op-name "print-int") (print-line "  call print_int")) 
-              ((string-eq op-name "print-char") (print-line "  call print_char")) 
-              ((string-eq op-name "print-chunk") (print-line "  call print_chunk")) 
-              ((or (string-eq op-name "car") (string-eq op-name "peek")) (print-line "  mov rax, [rax]")) 
-              ((string-eq op-name "cdr") (print-line "  mov rax, [rax+8]"))
-              ((string-eq op-name "alloc") (print-line "  imul rax, 8") (print-line "  mov rcx, r15") (print-line "  add r15, rax") (print-line "  mov rax, rcx"))
-              ((string-eq op-name "set-heap") (print-line "  mov r15, rax"))
-              (1 0))))
+        (let ((asm (lookup-symbol op-name (peek global-primitives))))
+          (cond (asm (print-string asm)) (1 0)))))
 
       (compile-primitive-ternary (lambda (op-name arg1 arg2 arg3 comp-env parent-arity)
         (compile-expr arg1 comp-env 0 parent-arity)
@@ -480,8 +667,8 @@
         (print-line "  pop rcx")
         (print-line "  pop r8")
         (print-string "  ;; inline ") (print-string op-name) (print-char 10)
-        (cond ((string-eq op-name "poke-idx") (print-line "  mov [r8 + rcx*8], rax"))
-              (1 0))))
+        (let ((asm (lookup-symbol op-name (peek global-primitives))))
+          (cond (asm (print-string asm)) (1 0)))))
 
       (compile-binary-fallback (lambda (op-name arg2 comp-env parent-arity)
         (print-line "  push rax")
@@ -490,15 +677,7 @@
         (print-line "  pop rax")
         (print-string "  ;; inline ") (print-string op-name) (print-char 10)
         (cond 
-          ((string-eq op-name "add") (print-line "  add rax, rcx"))
-          ((string-eq op-name "sub") (print-line "  sub rax, rcx"))
-          ((string-eq op-name "mul") (print-line "  imul rax, rcx"))
-          ((string-eq op-name "div") (print-line "  mov r8, rcx") (print-line "  cqo") (print-line "  idiv r8"))
-          ((string-eq op-name "eql") (print-line "  cmp rax, rcx") (print-line "  mov rax, 0") (print-line "  sete al"))
-          ((string-eq op-name "lt")  (print-line "  cmp rax, rcx") (print-line "  mov rax, 0") (print-line "  setl al"))
-          ((string-eq op-name "gt")  (print-line "  cmp rax, rcx") (print-line "  mov rax, 0") (print-line "  setg al"))
-          ((string-eq op-name "le")  (print-line "  cmp rax, rcx") (print-line "  mov rax, 0") (print-line "  setle al"))
-          ((string-eq op-name "ge")  (print-line "  cmp rax, rcx") (print-line "  mov rax, 0") (print-line "  setge al"))
+          ;; Keep ash specialized because it relies on dynamically generated local labels
           ((string-eq op-name "ash") 
            (let ((id (get-id)))
              (print-line "  test rcx, rcx")
@@ -509,74 +688,8 @@
              (print-string "ASH_LEFT_") (print-int id) (print-line ":")
              (print-line "  shl rax, cl")
              (print-string "ASH_DONE_") (print-int id) (print-line ":")))
-          ((or (string-eq op-name "logior") (string-eq op-name "or")) (print-line "  or rax, rcx"))
-          ((or (string-eq op-name "logand") (string-eq op-name "and")) (print-line "  and rax, rcx"))
-          ((string-eq op-name "poke") (print-line "  mov [rax], rcx"))
-          ((string-eq op-name "poke-byte") (print-line "  mov [rax], cl"))
-          ((string-eq op-name "cons") (print-line "  mov [r15], rax") (print-line "  mov [r15+8], rcx") (print-line "  mov rax, r15") (print-line "  add r15, 16"))
-          ((string-eq op-name "peek-idx") (print-line "  mov rax, [rax + rcx*8]"))
-          (1 0))))
-
-      (compile-variadic-loop (lambda (op-name args comp-env parent-arity)
-        (cond
-          (args
-           (let ((next-arg (safe-car args)))
-             (let ((tag2 (safe-car next-arg))
-                   (val2 (safe-cdr next-arg)))
-               
-               (cond
-                 ;; --- OPTIMIZATION 1: Arg is an Integer (Tag 0) ---
-                 ((eql tag2 0)
-                  (cond
-                    ((string-eq op-name "add") (print-string "  add rax, ") (print-int val2) (print-char 10))
-                    ((string-eq op-name "sub") (print-string "  sub rax, ") (print-int val2) (print-char 10))
-                    ((string-eq op-name "mul") (print-string "  imul rax, ") (print-int val2) (print-char 10))
-                    ((or (string-eq op-name "logior") (string-eq op-name "or")) (print-string "  or rax, ") (print-int val2) (print-char 10))
-                    ((or (string-eq op-name "logand") (string-eq op-name "and")) (print-string "  and rax, ") (print-int val2) (print-char 10))
-                    ((string-eq op-name "ash")
-                     (cond
-                       ((ge val2 0) (print-string "  shl rax, ") (print-int val2) (print-char 10))
-                       (1 (print-string "  sar rax, ") (print-int (sub 0 val2)) (print-char 10))))
-                    (1 (compile-binary-fallback op-name next-arg comp-env parent-arity))))
-
-                 ;; --- OPTIMIZATION 2: Arg is a Symbol (Tag 1) ---
-                 ((eql tag2 1)
-                  (let ((offset (lookup-env val2 comp-env)))
-                    (cond
-                      ((lt offset 0) ; Local variable
-                       (let ((abs-offset (sub 0 offset)))
-                         (cond
-                           ((string-eq op-name "add") (print-string "  add rax, [rbp - ") (print-int abs-offset) (print-line "]"))
-                           ((string-eq op-name "sub") (print-string "  sub rax, [rbp - ") (print-int abs-offset) (print-line "]"))
-                           ((string-eq op-name "mul") (print-string "  imul rax, [rbp - ") (print-int abs-offset) (print-line "]"))
-                           ((or (string-eq op-name "logior") (string-eq op-name "or")) (print-string "  or rax, [rbp - ") (print-int abs-offset) (print-line "]"))
-                           ((or (string-eq op-name "logand") (string-eq op-name "and")) (print-string "  and rax, [rbp - ") (print-int abs-offset) (print-line "]"))
-                           (1 (compile-binary-fallback op-name next-arg comp-env parent-arity)))))
-                      ((gt offset 0) ; Function argument
-                       (cond
-                         ((string-eq op-name "add") (print-string "  add rax, [rbp + ") (print-int offset) (print-line "]"))
-                         ((string-eq op-name "sub") (print-string "  sub rax, [rbp + ") (print-int offset) (print-line "]"))
-                         ((string-eq op-name "mul") (print-string "  imul rax, [rbp + ") (print-int offset) (print-line "]"))
-                         ((or (string-eq op-name "logior") (string-eq op-name "or")) (print-string "  or rax, [rbp + ") (print-int offset) (print-line "]"))
-                         ((or (string-eq op-name "logand") (string-eq op-name "and")) (print-string "  and rax, [rbp + ") (print-int offset) (print-line "]"))
-                         (1 (compile-binary-fallback op-name next-arg comp-env parent-arity))))
-                      (1 (compile-binary-fallback op-name next-arg comp-env parent-arity))))) ; Global variable
-
-                 ;; --- FALLBACK: Complex Expressions ---
-                 (1 (compile-binary-fallback op-name next-arg comp-env parent-arity)))))
-             
-           (compile-variadic-loop op-name (safe-cdr args) comp-env parent-arity))
-          (1 0))))
-
-      (compile-primitive-variadic (lambda (op-name args comp-env parent-arity)
-        (cond
-          (args
-           (compile-expr (safe-car args) comp-env 0 parent-arity)
-           (compile-variadic-loop op-name (safe-cdr args) comp-env parent-arity))
-          (1 
-           (cond
-             ((string-eq op-name "mul") (print-line "  mov rax, 1"))
-             (1 (print-line "  mov rax, 0")))))))
+          (1 (let ((asm (lookup-symbol op-name (peek global-primitives))))
+               (cond (asm (print-string asm)) (1 0)))))))
 
       ;; --- c[ad]+r Dynamic Chaining Helpers ---
       (get-chunk (lambda (lst idx)
@@ -727,8 +840,10 @@
   (print-line "  mov rbp, rsp")
   (print-line "  lea r15, [heap_start]")
   
+
   ;; Execute parser safely within a protected stack frame
-  (compile-program (parse-expr)) 
+  (load-primitives "primitives.asm")
+  (compile-program (parse-expr))
   
   (print-line "  mov rdi, rax")
   (print-line "  mov rax, 60")
