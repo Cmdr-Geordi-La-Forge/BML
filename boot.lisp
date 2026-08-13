@@ -21,27 +21,53 @@
       (skip-whitespace (lambda () (let ((c (next-char))) (cond ((is-space c) (skip-whitespace)) ((eql c 59) (skip-comment)) (1 (unget-char c))))))
 
       (print-string (lambda (s) (syscall 1 1 (safe-car s) (safe-cdr s))))
-      (print-sym (lambda (sym)
-        (cond (sym (print-chunk (safe-car sym)) (print-sym (safe-cdr sym)))
-              (1 0))))
       (print-line (lambda (s) (print-string s) (print-char 10)))
-      (string-eq (lambda (s1 s2) (cond ((and (eql s1 0) (eql s2 0)) 1) ((or (eql s1 0) (eql s2 0)) 0) ((eql (safe-car s1) (safe-car s2)) (string-eq (safe-cdr s1) (safe-cdr s2))) (1 0))))
-      (sym-eq-str-loop (lambda (sym ptr len)
-        (cond
-          ((eql sym 0) (le len 0))
-          ((le len 0) 0) ; sym has more chunks, but string is empty
-          ((eql (safe-car sym) (peek ptr))
-           (sym-eq-str-loop (safe-cdr sym) (add ptr 8) (sub len 8)))
-          (1 0))))
-      (sym-eq-str (lambda (sym str)
-        (sym-eq-str-loop sym (safe-car str) (safe-cdr str))))
+      ;; --- Replaced String Comparison ---
+      (string-eq-byte-loop (lambda (ptr1 ptr2 len idx)
+        (cond 
+          ;; If we reached the length without failing, they match!
+          ((ge idx len) 1)
+          (1 (let ((chunk-idx (div idx 8))
+                   (char-idx (sub idx (mul chunk-idx 8))))
+               ;; Fetch the 8-byte chunk for both strings
+               (let ((chunk1 (peek (add ptr1 (mul chunk-idx 8))))
+                     (chunk2 (peek (add ptr2 (mul chunk-idx 8)))))
+                 ;; Extract the exact byte we care about
+                 (let ((c1 (get-char-byte chunk1 char-idx))
+                       (c2 (get-char-byte chunk2 char-idx)))
+                   (cond 
+                     ((eql c1 c2) (string-eq-byte-loop ptr1 ptr2 len (add idx 1)))
+                     (1 0)))))))))
+
+      (string-eq (lambda (s1 s2)
+        (cond ((and (eql s1 0) (eql s2 0)) 1)
+              ((or (eql s1 0) (eql s2 0)) 0)
+              ((eql (safe-cdr s1) (safe-cdr s2)) 
+               ;; Start the byte-by-byte comparison at index 0
+               (string-eq-byte-loop (safe-car s1) (safe-car s2) (safe-cdr s1) 0))
+              (1 0))))
       (get-id (lambda () (let ((id (peek label-counter))) (poke label-counter (add id 1)) id)))
 
       ;; --- 2. The Lexer/Parser ---
-      (parse-int (lambda (acc) (let ((c (next-char))) (cond ((is-digit c) (parse-int (add (mul acc 10) (sub c 48)))) (1 (unget-char c) acc)))))
-      (parse-symbol-chunk (lambda (acc count) (let ((c (next-char))) (cond ((is-delim c) (unget-char c) acc) ((eql count 8) (unget-char c) acc) (1 (parse-symbol-chunk (logior acc (ash c (mul count 8))) (add count 1)))))))
-      (parse-symbol (lambda () (let ((chunk (parse-symbol-chunk 0 0)) (next (peek lookahead))) (cond ((is-delim next) (cons chunk 0)) (1 (cons chunk (parse-symbol)))))))
 
+      (parse-int (lambda (acc) (let ((c (next-char))) (cond ((is-digit c) (parse-int (add (mul acc 10) (sub c 48)))) (1 (unget-char c) acc)))))
+
+      (parse-symbol-loop (lambda (ptr count)
+        (let ((c (next-char)))
+          (cond
+            ((is-delim c)
+             (unget-char c)
+             (let ((aligned-count (mul (div (add count 8) 8) 8)))
+               (pad-zeros ptr count aligned-count)
+               (alloc (div aligned-count 8))
+               (cons ptr count)))
+            (1
+             (poke-byte (add ptr count) c)
+             (parse-symbol-loop ptr (add count 1)))))))
+
+      (parse-symbol (lambda () 
+        (parse-symbol-loop (get-heap) 0)))
+      
       (pad-zeros (lambda (ptr count target)
         (cond ((lt count target)
                (poke-byte (add ptr count) 0)
@@ -90,21 +116,20 @@
                  ((eql tag 3) val)
                  ((eql tag 1) (lookup-macro val env))
                  ((eql tag 2)
+                  ;; Extract the raw string from the symbol node
                   (let ((func-name (safe-cdr (safe-car val))) (args (safe-cdr val)))
                     (cond
-                      ((sym-eq-str func-name "quote") (safe-car args))
-                      ((sym-eq-str func-name "car") (safe-car (eval-ast (safe-car args) env)))
-                      ((sym-eq-str func-name "cdr") (safe-cdr (eval-ast (safe-car args) env)))
-                      ((sym-eq-str func-name "cons") (cons (eval-ast (safe-car args) env) (eval-ast (safe-car (safe-cdr args)) env)))
-                      ((sym-eq-str func-name "eql") (cond ((eql (eval-ast (safe-car args) env) (eval-ast (safe-car (safe-cdr args)) env)) 1) (1 0)))
-                      ((sym-eq-str func-name "if") (cond ((eval-ast (safe-car args) env) (eval-ast (safe-car (safe-cdr args)) env)) (1 (eval-ast (safe-car (safe-cdr (safe-cdr args))) env))))
+                      ((string-eq func-name "quote") (safe-car args))
+                      ((string-eq func-name "car") (safe-car (eval-ast (safe-car args) env)))
+                      ((string-eq func-name "cdr") (safe-cdr (eval-ast (safe-car args) env)))
+                      ((string-eq func-name "cons") (cons (eval-ast (safe-car args) env) (eval-ast (safe-car (safe-cdr args)) env)))
+                      ((string-eq func-name "eql") (cond ((eql (eval-ast (safe-car args) env) (eval-ast (safe-car (safe-cdr args)) env)) 1) (1 0)))
+                      ((string-eq func-name "if") (cond ((eval-ast (safe-car args) env) (eval-ast (safe-car (safe-cdr args)) env)) (1 (eval-ast (safe-car (safe-cdr (safe-cdr args))) env))))
                       (1 0))))
                  (1 0)))))))
 
       ;; --- 3. The Code Generator ---
       (compile-number (lambda (val) (print-string "  mov rax, ") (print-int val) (print-char 10)))
-      
-      (emit-sym-chunks (lambda (s id chunk-id) (cond (s (print-string "SYM_") (print-int id) (print-string "_") (print-int chunk-id) (print-line ":") (print-string "  dq ") (print-int (safe-car s)) (print-char 10) (cond ((safe-cdr s) (print-string "  dq SYM_") (print-int id) (print-string "_") (print-int (add chunk-id 1)) (print-char 10) (emit-sym-chunks (safe-cdr s) id (add chunk-id 1))) (1 (print-line "  dq 0")))) (1 0))))
       
       (emit-inline-symbol (lambda (str-chunks)
         (let ((existing (lookup-symbol str-chunks (peek symbol-table))))
@@ -124,13 +149,35 @@
 
       ;; --- DATA SECTION EMITTERS ---
       
-      (emit-string-data (lambda (ptr len)
+      (emit-contiguous-loop (lambda (ptr len)
         (cond
           ((gt len 0)
-           (print-string "  db ")
            (print-int (logand (peek ptr) 255))
-           (print-char 10)
-           (emit-string-data (add ptr 1) (sub len 1)))
+           (cond ((gt len 1) (print-string ", ")) (1 0))
+           (emit-contiguous-loop (add ptr 1) (sub len 1)))
+          (1 0))))
+
+      (emit-contiguous-data (lambda (prefix id val)
+        (print-line "align 8")
+        (print-string prefix) (print-int id) (print-line ":")
+        (print-string "  dq ") (print-string prefix) (print-int id) (print-line "_data")
+        (print-string "  dq ") (print-int (safe-cdr val)) (print-char 10)
+        (print-string prefix) (print-int id) (print-line "_data:")
+        (cond ((gt (safe-cdr val) 0)
+               (print-string "  db ")
+               (emit-contiguous-loop (safe-car val) (safe-cdr val))
+               (print-char 10))
+              (1 0))
+        (print-line "  align 8")))
+
+      (emit-all-symbols (lambda (table)
+        (cond
+          (table
+           (let ((entry (safe-car table)))
+             (let ((sym (safe-car entry))
+                   (id (safe-car (safe-cdr entry))))
+               (emit-contiguous-data "SYM_" id sym)
+               (emit-all-symbols (safe-cdr table)))))
           (1 0))))
 
       (emit-all-strings (lambda (table)
@@ -139,24 +186,8 @@
            (let ((entry (safe-car table)))
              (let ((id (safe-car entry))
                    (val (safe-cdr entry)))
-               (let ((ptr (safe-car val))
-                     (len (safe-cdr val)))
-                 ;; Emit up to the ALIGNED length to ensure FASM pads with zeros
-                 (let ((aligned-len (mul (div (add len 8) 8) 8)))
-                   (print-string "STR_") (print-int id) (print-line ":")
-                   (print-string "  dq STR_DATA_") (print-int id) (print-char 10)
-                   (print-string "  dq ") (print-int len) (print-char 10)
-                   (print-string "STR_DATA_") (print-int id) (print-line ":")
-                   (emit-string-data ptr aligned-len)
-                   (emit-all-strings (safe-cdr table)))))))
-          (1 0))))
-      
-      (emit-all-symbols (lambda (table)
-        (cond
-          (table
-           (let ((entry (safe-car table)))
-             (emit-sym-chunks (safe-car entry) (safe-car (safe-cdr entry)) 0)
-             (emit-all-symbols (safe-cdr table))))
+               (emit-contiguous-data "STR_" id val)
+               (emit-all-strings (safe-cdr table)))))
           (1 0))))
 
       (emit-all-globals (lambda (table)
@@ -240,15 +271,21 @@
       (compile-cond-clauses (lambda (clauses end-id comp-env is-tail parent-arity)
         (cond
           ((eql clauses 0) (print-line "  mov rax, 0") (print-string "COND_END_") (print-int end-id) (print-line ":"))
-          (1 (let ((clause (safe-car clauses)) (next-id (get-id)))
-               (let ((clause-items (safe-cdr clause)))
-                 (compile-expr (safe-car clause-items) comp-env 0 parent-arity) ; Condition is NEVER tail
-                 (print-line "  test rax, rax")
-                 (print-string "  jz COND_NEXT_") (print-int next-id) (print-char 10)
-                 (compile-sequence (safe-cdr clause-items) comp-env is-tail parent-arity)
-                 (print-string "  jmp COND_END_") (print-int end-id) (print-char 10)
-                 (print-string "COND_NEXT_") (print-int next-id) (print-line ":")
-                 (compile-cond-clauses (safe-cdr clauses) end-id comp-env is-tail parent-arity)))))))
+          (1 (let ((clause      (safe-car clauses))
+                   (next-id     (get-id))
+                   (clause-list (safe-cdr clause))       ; 1. Peel off the AST tag 2
+                   (cnd         (safe-car clause-list))  ; 2. Extract the condition
+                   (body        (safe-cdr clause-list))) ; 3. Extract the body statements
+                   
+               (compile-expr cnd comp-env 0 parent-arity)
+               (print-line "  test rax, rax")
+               (print-string "  jz COND_NEXT_") (print-int next-id) (print-char 10)
+               
+               (compile-sequence body comp-env is-tail parent-arity)
+               
+               (print-string "  jmp COND_END_") (print-int end-id) (print-char 10)
+               (print-string "COND_NEXT_") (print-int next-id) (print-line ":")
+               (compile-cond-clauses (safe-cdr clauses) end-id comp-env is-tail parent-arity))))))
 
       (compile-cond (lambda (args comp-env is-tail parent-arity) 
         (let ((end-id (get-id))) 
@@ -377,59 +414,61 @@
       ;; --- 6. Hardcoded Hardware Primitives ---
       ;; --- Primitive Category Checkers ---
       (is-nullary (lambda (s)
-        (cond ((sym-eq-str s "read-char") 1)
-              ((sym-eq-str s "get-heap") 1)
+        (cond ((string-eq s "read-char") 1)
+              ((string-eq s "get-heap") 1)
               (1 0))))
 
       (is-unary (lambda (s)
-        (cond ((sym-eq-str s "print-int") 1)
-              ((sym-eq-str s "print-char") 1)
-              ((sym-eq-str s "print-chunk") 1)
-              ((sym-eq-str s "peek") 1)
-              ((sym-eq-str s "alloc") 1)
-              ((sym-eq-str s "set-heap") 1)
+        (cond ((string-eq s "print-int") 1)
+              ((string-eq s "print-char") 1)
+              ((string-eq s "print-chunk") 1)
+              ((string-eq s "peek") 1)
+              ((string-eq s "alloc") 1)
+              ((string-eq s "set-heap") 1)
+              ((string-eq s "car") 1)
+              ((string-eq s "cdr") 1)
               (1 0))))
 
       (is-variadic-math (lambda (s)
-        (cond ((sym-eq-str s "add") 1)
-              ((sym-eq-str s "sub") 1)
-              ((sym-eq-str s "mul") 1)
-              ((sym-eq-str s "div") 1)
-              ((sym-eq-str s "logior") 1)
-              ((sym-eq-str s "or") 1)
-              ((sym-eq-str s "logand") 1)
-              ((sym-eq-str s "and") 1)
+        (cond ((string-eq s "add") 1)
+              ((string-eq s "sub") 1)
+              ((string-eq s "mul") 1)
+              ((string-eq s "div") 1)
+              ((string-eq s "logior") 1)
+              ((string-eq s "or") 1)
+              ((string-eq s "logand") 1)
+              ((string-eq s "and") 1)
               (1 0))))
 
       (is-strict-binary (lambda (s)
-        (cond ((sym-eq-str s "eql") 1)
-              ((sym-eq-str s "lt") 1)
-              ((sym-eq-str s "gt") 1)
-              ((sym-eq-str s "le") 1)
-              ((sym-eq-str s "ge") 1)
-              ((sym-eq-str s "poke") 1)
-              ((sym-eq-str s "poke-byte") 1)
-              ((sym-eq-str s "peek-idx") 1)
-              ((sym-eq-str s "cons") 1)
-              ((sym-eq-str s "ash") 1) ; ash is now handled generically here!
+        (cond ((string-eq s "eql") 1)
+              ((string-eq s "lt") 1)
+              ((string-eq s "gt") 1)
+              ((string-eq s "le") 1)
+              ((string-eq s "ge") 1)
+              ((string-eq s "poke") 1)
+              ((string-eq s "poke-byte") 1)
+              ((string-eq s "peek-idx") 1)
+              ((string-eq s "cons") 1)
+              ((string-eq s "ash") 1) ; ash is now handled generically here!
               (1 0))))
       
       (compile-primitive-nullary (lambda (op-name) 
-        (print-string "  ;; inline ") (print-sym op-name) (print-char 10)
-        (cond ((sym-eq-str op-name "read-char") (print-line "  call read_char"))
-              ((sym-eq-str op-name "get-heap")  (print-line "  mov rax, r15"))
+        (print-string "  ;; inline ") (print-string op-name) (print-char 10)
+        (cond ((string-eq op-name "read-char") (print-line "  call read_char"))
+              ((string-eq op-name "get-heap")  (print-line "  mov rax, r15"))
               (1 0))))
 
       (compile-primitive-unary (lambda (op-name arg comp-env parent-arity) 
         (compile-expr arg comp-env 0 parent-arity) 
-        (print-string "  ;; inline ") (print-sym op-name) (print-char 10)
-        (cond ((sym-eq-str op-name "print-int") (print-line "  call print_int")) 
-              ((sym-eq-str op-name "print-char") (print-line "  call print_char")) 
-              ((sym-eq-str op-name "print-chunk") (print-line "  call print_chunk")) 
-              ((or (sym-eq-str op-name "car") (sym-eq-str op-name "peek")) (print-line "  mov rax, [rax]")) 
-              ((sym-eq-str op-name "cdr") (print-line "  mov rax, [rax+8]"))
-              ((sym-eq-str op-name "alloc") (print-line "  imul rax, 8") (print-line "  mov rcx, r15") (print-line "  add r15, rax") (print-line "  mov rax, rcx"))
-              ((sym-eq-str op-name "set-heap") (print-line "  mov r15, rax"))
+        (print-string "  ;; inline ") (print-string op-name) (print-char 10)
+        (cond ((string-eq op-name "print-int") (print-line "  call print_int")) 
+              ((string-eq op-name "print-char") (print-line "  call print_char")) 
+              ((string-eq op-name "print-chunk") (print-line "  call print_chunk")) 
+              ((or (string-eq op-name "car") (string-eq op-name "peek")) (print-line "  mov rax, [rax]")) 
+              ((string-eq op-name "cdr") (print-line "  mov rax, [rax+8]"))
+              ((string-eq op-name "alloc") (print-line "  imul rax, 8") (print-line "  mov rcx, r15") (print-line "  add r15, rax") (print-line "  mov rax, rcx"))
+              ((string-eq op-name "set-heap") (print-line "  mov r15, rax"))
               (1 0))))
 
       (compile-primitive-ternary (lambda (op-name arg1 arg2 arg3 comp-env parent-arity)
@@ -440,8 +479,8 @@
         (compile-expr arg3 comp-env 0 parent-arity)
         (print-line "  pop rcx")
         (print-line "  pop r8")
-        (print-string "  ;; inline ") (print-sym op-name) (print-char 10)
-        (cond ((sym-eq-str op-name "poke-idx") (print-line "  mov [r8 + rcx*8], rax"))
+        (print-string "  ;; inline ") (print-string op-name) (print-char 10)
+        (cond ((string-eq op-name "poke-idx") (print-line "  mov [r8 + rcx*8], rax"))
               (1 0))))
 
       (compile-binary-fallback (lambda (op-name arg2 comp-env parent-arity)
@@ -449,18 +488,18 @@
         (compile-expr arg2 comp-env 0 parent-arity)
         (print-line "  mov rcx, rax")
         (print-line "  pop rax")
-        (print-string "  ;; inline ") (print-sym op-name) (print-char 10)
+        (print-string "  ;; inline ") (print-string op-name) (print-char 10)
         (cond 
-          ((sym-eq-str op-name "add") (print-line "  add rax, rcx"))
-          ((sym-eq-str op-name "sub") (print-line "  sub rax, rcx"))
-          ((sym-eq-str op-name "mul") (print-line "  imul rax, rcx"))
-          ((sym-eq-str op-name "div") (print-line "  mov r8, rcx") (print-line "  cqo") (print-line "  idiv r8"))
-          ((sym-eq-str op-name "eql") (print-line "  cmp rax, rcx") (print-line "  mov rax, 0") (print-line "  sete al"))
-          ((sym-eq-str op-name "lt")  (print-line "  cmp rax, rcx") (print-line "  mov rax, 0") (print-line "  setl al"))
-          ((sym-eq-str op-name "gt")  (print-line "  cmp rax, rcx") (print-line "  mov rax, 0") (print-line "  setg al"))
-          ((sym-eq-str op-name "le")  (print-line "  cmp rax, rcx") (print-line "  mov rax, 0") (print-line "  setle al"))
-          ((sym-eq-str op-name "ge")  (print-line "  cmp rax, rcx") (print-line "  mov rax, 0") (print-line "  setge al"))
-          ((sym-eq-str op-name "ash") 
+          ((string-eq op-name "add") (print-line "  add rax, rcx"))
+          ((string-eq op-name "sub") (print-line "  sub rax, rcx"))
+          ((string-eq op-name "mul") (print-line "  imul rax, rcx"))
+          ((string-eq op-name "div") (print-line "  mov r8, rcx") (print-line "  cqo") (print-line "  idiv r8"))
+          ((string-eq op-name "eql") (print-line "  cmp rax, rcx") (print-line "  mov rax, 0") (print-line "  sete al"))
+          ((string-eq op-name "lt")  (print-line "  cmp rax, rcx") (print-line "  mov rax, 0") (print-line "  setl al"))
+          ((string-eq op-name "gt")  (print-line "  cmp rax, rcx") (print-line "  mov rax, 0") (print-line "  setg al"))
+          ((string-eq op-name "le")  (print-line "  cmp rax, rcx") (print-line "  mov rax, 0") (print-line "  setle al"))
+          ((string-eq op-name "ge")  (print-line "  cmp rax, rcx") (print-line "  mov rax, 0") (print-line "  setge al"))
+          ((string-eq op-name "ash") 
            (let ((id (get-id)))
              (print-line "  test rcx, rcx")
              (print-string "  jns ASH_LEFT_") (print-int id) (print-char 10)
@@ -470,12 +509,12 @@
              (print-string "ASH_LEFT_") (print-int id) (print-line ":")
              (print-line "  shl rax, cl")
              (print-string "ASH_DONE_") (print-int id) (print-line ":")))
-          ((or (sym-eq-str op-name "logior") (sym-eq-str op-name "or")) (print-line "  or rax, rcx"))
-          ((or (sym-eq-str op-name "logand") (sym-eq-str op-name "and")) (print-line "  and rax, rcx"))
-          ((sym-eq-str op-name "poke") (print-line "  mov [rax], rcx"))
-          ((sym-eq-str op-name "poke-byte") (print-line "  mov [rax], cl"))
-          ((sym-eq-str op-name "cons") (print-line "  mov [r15], rax") (print-line "  mov [r15+8], rcx") (print-line "  mov rax, r15") (print-line "  add r15, 16"))
-          ((sym-eq-str op-name "peek-idx") (print-line "  mov rax, [rax + rcx*8]"))
+          ((or (string-eq op-name "logior") (string-eq op-name "or")) (print-line "  or rax, rcx"))
+          ((or (string-eq op-name "logand") (string-eq op-name "and")) (print-line "  and rax, rcx"))
+          ((string-eq op-name "poke") (print-line "  mov [rax], rcx"))
+          ((string-eq op-name "poke-byte") (print-line "  mov [rax], cl"))
+          ((string-eq op-name "cons") (print-line "  mov [r15], rax") (print-line "  mov [r15+8], rcx") (print-line "  mov rax, r15") (print-line "  add r15, 16"))
+          ((string-eq op-name "peek-idx") (print-line "  mov rax, [rax + rcx*8]"))
           (1 0))))
 
       (compile-variadic-loop (lambda (op-name args comp-env parent-arity)
@@ -489,12 +528,12 @@
                  ;; --- OPTIMIZATION 1: Arg is an Integer (Tag 0) ---
                  ((eql tag2 0)
                   (cond
-                    ((sym-eq-str op-name "add") (print-string "  add rax, ") (print-int val2) (print-char 10))
-                    ((sym-eq-str op-name "sub") (print-string "  sub rax, ") (print-int val2) (print-char 10))
-                    ((sym-eq-str op-name "mul") (print-string "  imul rax, ") (print-int val2) (print-char 10))
-                    ((or (sym-eq-str op-name "logior") (sym-eq-str op-name "or")) (print-string "  or rax, ") (print-int val2) (print-char 10))
-                    ((or (sym-eq-str op-name "logand") (sym-eq-str op-name "and")) (print-string "  and rax, ") (print-int val2) (print-char 10))
-                    ((sym-eq-str op-name "ash")
+                    ((string-eq op-name "add") (print-string "  add rax, ") (print-int val2) (print-char 10))
+                    ((string-eq op-name "sub") (print-string "  sub rax, ") (print-int val2) (print-char 10))
+                    ((string-eq op-name "mul") (print-string "  imul rax, ") (print-int val2) (print-char 10))
+                    ((or (string-eq op-name "logior") (string-eq op-name "or")) (print-string "  or rax, ") (print-int val2) (print-char 10))
+                    ((or (string-eq op-name "logand") (string-eq op-name "and")) (print-string "  and rax, ") (print-int val2) (print-char 10))
+                    ((string-eq op-name "ash")
                      (cond
                        ((ge val2 0) (print-string "  shl rax, ") (print-int val2) (print-char 10))
                        (1 (print-string "  sar rax, ") (print-int (sub 0 val2)) (print-char 10))))
@@ -507,19 +546,19 @@
                       ((lt offset 0) ; Local variable
                        (let ((abs-offset (sub 0 offset)))
                          (cond
-                           ((sym-eq-str op-name "add") (print-string "  add rax, [rbp - ") (print-int abs-offset) (print-line "]"))
-                           ((sym-eq-str op-name "sub") (print-string "  sub rax, [rbp - ") (print-int abs-offset) (print-line "]"))
-                           ((sym-eq-str op-name "mul") (print-string "  imul rax, [rbp - ") (print-int abs-offset) (print-line "]"))
-                           ((or (sym-eq-str op-name "logior") (sym-eq-str op-name "or")) (print-string "  or rax, [rbp - ") (print-int abs-offset) (print-line "]"))
-                           ((or (sym-eq-str op-name "logand") (sym-eq-str op-name "and")) (print-string "  and rax, [rbp - ") (print-int abs-offset) (print-line "]"))
+                           ((string-eq op-name "add") (print-string "  add rax, [rbp - ") (print-int abs-offset) (print-line "]"))
+                           ((string-eq op-name "sub") (print-string "  sub rax, [rbp - ") (print-int abs-offset) (print-line "]"))
+                           ((string-eq op-name "mul") (print-string "  imul rax, [rbp - ") (print-int abs-offset) (print-line "]"))
+                           ((or (string-eq op-name "logior") (string-eq op-name "or")) (print-string "  or rax, [rbp - ") (print-int abs-offset) (print-line "]"))
+                           ((or (string-eq op-name "logand") (string-eq op-name "and")) (print-string "  and rax, [rbp - ") (print-int abs-offset) (print-line "]"))
                            (1 (compile-binary-fallback op-name next-arg comp-env parent-arity)))))
                       ((gt offset 0) ; Function argument
                        (cond
-                         ((sym-eq-str op-name "add") (print-string "  add rax, [rbp + ") (print-int offset) (print-line "]"))
-                         ((sym-eq-str op-name "sub") (print-string "  sub rax, [rbp + ") (print-int offset) (print-line "]"))
-                         ((sym-eq-str op-name "mul") (print-string "  imul rax, [rbp + ") (print-int offset) (print-line "]"))
-                         ((or (sym-eq-str op-name "logior") (sym-eq-str op-name "or")) (print-string "  or rax, [rbp + ") (print-int offset) (print-line "]"))
-                         ((or (sym-eq-str op-name "logand") (sym-eq-str op-name "and")) (print-string "  and rax, [rbp + ") (print-int offset) (print-line "]"))
+                         ((string-eq op-name "add") (print-string "  add rax, [rbp + ") (print-int offset) (print-line "]"))
+                         ((string-eq op-name "sub") (print-string "  sub rax, [rbp + ") (print-int offset) (print-line "]"))
+                         ((string-eq op-name "mul") (print-string "  imul rax, [rbp + ") (print-int offset) (print-line "]"))
+                         ((or (string-eq op-name "logior") (string-eq op-name "or")) (print-string "  or rax, [rbp + ") (print-int offset) (print-line "]"))
+                         ((or (string-eq op-name "logand") (string-eq op-name "and")) (print-string "  and rax, [rbp + ") (print-int offset) (print-line "]"))
                          (1 (compile-binary-fallback op-name next-arg comp-env parent-arity))))
                       (1 (compile-binary-fallback op-name next-arg comp-env parent-arity))))) ; Global variable
 
@@ -536,7 +575,7 @@
            (compile-variadic-loop op-name (safe-cdr args) comp-env parent-arity))
           (1 
            (cond
-             ((sym-eq-str op-name "mul") (print-line "  mov rax, 1"))
+             ((string-eq op-name "mul") (print-line "  mov rax, 1"))
              (1 (print-line "  mov rax, 0")))))))
 
       ;; --- c[ad]+r Dynamic Chaining Helpers ---
@@ -546,58 +585,59 @@
               (1 (get-chunk (safe-cdr lst) (sub idx 1))))))
 
       (get-char-byte (lambda (chunk char-idx)
-        (cond ((eql char-idx 0) (logand chunk 255))
-              (1 (get-char-byte (div chunk 256) (sub char-idx 1))))))
+        (logand (ash chunk (mul char-idx -8)) 255)))
 
-      (is-cadr-chars (lambda (sym-chunks byte-idx)
-        (let ((chunk-idx (div byte-idx 8))
-              (char-idx (sub byte-idx (mul chunk-idx 8))))
-          (let ((chunk (get-chunk sym-chunks chunk-idx)))
-            (cond
-              ((eql chunk 0) 0)
-              (1 (let ((c (get-char-byte chunk char-idx)))
+      (is-cadr-chars (lambda (str byte-idx)
+        (cond
+          ;; Out of bounds check
+          ((ge byte-idx (safe-cdr str)) 0)
+          (1 (let ((chunk-idx (div byte-idx 8))
+                   (char-idx (sub byte-idx (mul chunk-idx 8))))
+               ;; Dereference the specific 8-byte chunk from the heap
+               (let ((chunk (peek (add (safe-car str) (mul chunk-idx 8)))))
+                 (let ((c (get-char-byte chunk char-idx)))
                    (cond
                      ((eql c 114) ; 'r'
-                      (let ((next-idx (add byte-idx 1)))
-                        (let ((n-chunk-idx (div next-idx 8))
-                              (n-char-idx (sub next-idx (mul (div next-idx 8) 8))))
-                          (let ((n-chunk (get-chunk sym-chunks n-chunk-idx)))
-                            (cond ((eql n-chunk 0) 1)
-                                  (1 (let ((n-c (get-char-byte n-chunk n-char-idx)))
-                                       (cond ((eql n-c 0) 1) (1 0)))))))))
+                      ;; Must be the last character in the string
+                      (cond ((eql byte-idx (sub (safe-cdr str) 1)) 1) (1 0)))
                      ((or (eql c 97) (eql c 100)) ; 'a' or 'd'
-                      (is-cadr-chars sym-chunks (add byte-idx 1)))
+                      (is-cadr-chars str (add byte-idx 1)))
                      (1 0)))))))))
 
-      (is-cadr-form (lambda (sym-chunks)
+      (is-cadr-form (lambda (str)
         (cond
-          ((eql sym-chunks 0) 0)
-          (1 (let ((c0 (get-char-byte (safe-car sym-chunks) 0))
-                   (c1 (get-char-byte (safe-car sym-chunks) 1)))
-               (cond
-                 ;; Must start with 'c', followed by at least one 'a' or 'd'
-                 ((and (eql c0 99) (or (eql c1 97) (eql c1 100)))
-                  (is-cadr-chars sym-chunks 1))
-                 (1 0)))))))
+          ((le (safe-cdr str) 0) 0)
+          (1 (let ((chunk (peek (safe-car str)))) ; Dereference the first 8 bytes
+               (let ((c0 (get-char-byte chunk 0))
+                     (c1 (get-char-byte chunk 1)))
+                 (cond
+                   ;; Must start with 'c', followed by at least one 'a' or 'd'
+                   ((and (eql c0 99) (or (eql c1 97) (eql c1 100)))
+                    (is-cadr-chars str 1))
+                   (1 0))))))))
 
-      (emit-cadr-chars (lambda (sym-chunks byte-idx)
+      (emit-cadr-chars (lambda (str byte-idx)
         (let ((chunk-idx (div byte-idx 8))
               (char-idx (sub byte-idx (mul chunk-idx 8))))
-          (let ((chunk (get-chunk sym-chunks chunk-idx)))
+          ;; Dereference the specific 8-byte chunk from the heap
+          (let ((chunk (peek (add (safe-car str) (mul chunk-idx 8)))))
             (let ((c (get-char-byte chunk char-idx)))
               (cond
                 ((eql c 114) 1)
                 (1 
-                 ;; Brilliant Recursion: Emits left-to-right instructions while popping off the stack!
-                 (emit-cadr-chars sym-chunks (add byte-idx 1))
+                 ;; Recursive call pushes down the stack
+                 (emit-cadr-chars str (add byte-idx 1))
+                 ;; Pop left-to-right to maintain execution order
                  (cond ((eql c 97) (print-line "  mov rax, [rax]"))
                        (1 (print-line "  mov rax, [rax+8]"))))))))))
 
       (compile-list (lambda (ast-list comp-env is-tail parent-arity)
         (let ((func-node (safe-car ast-list)) (args (safe-cdr ast-list)))
           (cond
+            ;; Check if the function node is a SYMBOL (tag 1)
             ((eql (safe-car func-node) 1)
-             (let ((func-name (safe-cdr func-node)))
+             ;; Peel off the tag 1 to get the actual (ptr . len) string
+             (let ((func-name (safe-cdr func-node))) 
                (let ((macro-def (lookup-macro func-name (peek compile-env))))
                  (cond
                    (macro-def
@@ -605,20 +645,20 @@
                        (compile-expr (eval-ast macro-body (bind-macro-args macro-params args 0)) comp-env is-tail parent-arity)))
                    (1
                      (cond
-                       ((sym-eq-str func-name "defmacro")
+                       ((string-eq func-name "defmacro")
                         (let ((macro-sig (safe-cdr (safe-car args))) (macro-body (safe-car (safe-cdr args))))
                           (poke compile-env (cons (cons (safe-cdr (safe-car macro-sig)) (cons (safe-cdr macro-sig) macro-body)) (peek compile-env)))))
-                       ((sym-eq-str func-name "let") 
+                       ((string-eq func-name "let") 
                         (compile-let args comp-env is-tail parent-arity))
-                       ((sym-eq-str func-name "lambda") (compile-lambda args comp-env))
-                       ((sym-eq-str func-name "cond") (compile-cond args comp-env is-tail parent-arity))
-                       ((sym-eq-str func-name "if") (compile-if args comp-env is-tail parent-arity))
+                       ((string-eq func-name "lambda") (compile-lambda args comp-env))
+                       ((string-eq func-name "cond") (compile-cond args comp-env is-tail parent-arity))
+                       ((string-eq func-name "if") (compile-if args comp-env is-tail parent-arity))
                        ((eql (is-cadr-form func-name) 1)
                         (compile-expr (safe-car args) comp-env 0 parent-arity)
                         (print-line "  ;; inline c*r")
                         (emit-cadr-chars func-name 1))
                        
-                       ;; --- THE NEW CLEAN DISPATCH ---
+                       ;; --- THE CLEAN DISPATCH ---
                        ((is-nullary func-name)
                         (compile-primitive-nullary func-name))
                        ((is-unary func-name)
@@ -628,10 +668,12 @@
                        ((is-strict-binary func-name)
                         ;; Ensure strict binary ops only ever get 2 arguments fed to the variadic compiler
                         (compile-primitive-variadic func-name (cons (safe-car args) (cons (safe-car (safe-cdr args)) 0)) comp-env parent-arity))
-                       ((sym-eq-str func-name "poke-idx")
+                       ((string-eq func-name "poke-idx")
                         (compile-primitive-ternary func-name (safe-car args) (safe-car (safe-cdr args)) (safe-car (safe-cdr (safe-cdr args))) comp-env parent-arity))
-                       ((sym-eq-str func-name "syscall") (compile-syscall args comp-env parent-arity))
+                       ((string-eq func-name "syscall") (compile-syscall args comp-env parent-arity))
+                       ;; If no primitives/macros match, compile it as a standard user function call!
                        (1 (compile-apply func-node args comp-env is-tail parent-arity))))))))
+            ;; If func-node is NOT a symbol (e.g. ((lambda (...) ...)) ), compile as standard call
             (1 (compile-apply func-node args comp-env is-tail parent-arity))))))
 
       (compile-expr (lambda (ast comp-env is-tail parent-arity)
@@ -669,7 +711,7 @@
                (cond
                  ((eql (safe-car func-node) 1)
                   (cond
-                    ((sym-eq-str (safe-cdr func-node) "let")
+                    ((string-eq (safe-cdr func-node) "let")
                      (compile-global-let (safe-cdr val) 0))
                     (1 (compile-expr ast 0 0 0))))
                  (1 (compile-expr ast 0 0 0))))))

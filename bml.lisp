@@ -380,42 +380,49 @@
                   (format nil "  mov rax, [rbp - ~a]~%" (- location)))))
         (error "Compile error: Unbound variable '~a'" expr))))
 
-(defun chunk-to-int (chunk)
-  "Converts a string chunk (up to 8 chars) into a little-endian 64-bit integer."
-  (let ((val 0))
-    (loop for i from 0 below (length chunk)
-          for char = (char chunk i)
-          for code = (char-code char)
-          do (setf val (logior val (ash code (* i 8)))))
-    val))
+(defun parse-escapes (str)
+  "Translates raw escape sequences like '\\n' into actual byte values."
+  (let ((bytes nil)
+        (i 0)
+        (len (length str)))
+    (loop while (< i len) do
+          (let ((c (char str i)))
+            (if (and (char= c #\\) (< (1+ i) len))
+                (let ((next-c (char str (1+ i))))
+                  (case next-c
+                    (#\n (push 10 bytes))
+                    (#\t (push 9 bytes))
+                    (#\r (push 13 bytes))
+                    (#\\ (push 92 bytes))
+                    (#\" (push 34 bytes))
+                    (t   (push (char-code c) bytes)
+                         (push (char-code next-c) bytes)))
+                  (incf i 2))
+                (progn
+                  (push (char-code c) bytes)
+                  (incf i 1)))))
+    (reverse bytes)))
 
-(defun emit-static-list (out label str)
-  "Emits a linked list of 8-byte string chunks under LABEL to stream OUT."
-  (let ((len (length str)))
-    (if (= len 0)
-        ;; Edge case: empty string / empty symbol
-        (progn
-          (format out "~a:~%" label)
-          (format out "  dq 0~%")
-          (format out "  dq 0~%"))
-        ;; Normal case: slice into chunks of 8
-        (loop for i from 0 below len by 8
-              for chunk-idx from 0
-              for chunk = (subseq str i (min len (+ i 8)))
-              for is-first = (= i 0)
-              for is-last = (>= (+ i 8) len)
-              do
-              (if is-first
-                  (format out "~a:~%" label)
-                  (format out "~a_~a:~%" label chunk-idx))
-
-              ;; Print the CAR (the 8-byte hex characters)
-              (format out "  dq 0x~16,'0X  ; '~a'~%" (chunk-to-int chunk) chunk)
-
-              ;; Print the CDR (pointer to next chunk, or 0)
-              (if is-last
-                  (format out "  dq 0~%")
-                  (format out "  dq ~a_~a~%" label (1+ chunk-idx)))))))
+(defun emit-contiguous-data (out label str &key parse-escapes)
+  (let* ((bytes (if parse-escapes (parse-escapes str) 
+                    (loop for i from 0 below (length str) collect (char-code (char str i)))))
+         (len (length bytes)))
+    (format out "align 8~%")
+    (format out "~a:~%" label)
+    (format out "  dq ~a_data~%" label)
+    (format out "  dq ~a~%" len)
+    (format out "~a_data:~%" label)
+    (when (> len 0)
+      (format out "  db ")
+      (loop for i from 0 below len
+            for byte in bytes do
+            (if (and (>= byte 32) (<= byte 126) (/= byte 39))
+                (format out "'~a'" (code-char byte))
+                (format out "~a" byte))
+            (if (= i (1- len))
+                (format out "~%")
+                (format out ", "))))
+    (format out "  align 8~%")))
 
 (defun expand-macro (expr)
   "Expands syntactic sugar down into our native special forms."
@@ -485,25 +492,11 @@
   (loop for sym in *used-symbols*
         for str = (symbol-name sym)
         for safe-name = (format nil "sym_~a" (fasm-label sym))
-        do (emit-static-list out safe-name str))
+        do (emit-contiguous-data out safe-name str :parse-escapes nil))
 
   (format out "~%  ;; --- STRINGS ---~%")
-      (loop for (str . label) in *strings* do
-            ;; Calculate length aligned to the next 8-byte boundary
-            (let* ((len (length str))
-                   (aligned-len (* (ceiling (+ len 1) 8) 8))) 
-              (format out "~a:~%" label)
-              (format out "  dq ~a_data~%" label)
-              (format out "  dq ~a~%" len)
-              (format out "~a_data:~%" label)
-              (format out "  db ")
-              (loop for i from 0 below aligned-len do
-                    (if (< i len)
-                        (format out "~a" (char-code (char str i)))
-                        (format out "0")) ; Fill with null characters!
-                    (if (= i (1- aligned-len))
-                        (format out "~%")
-                        (format out ", ")))))
+  (loop for (str . label) in *strings* do
+        (emit-contiguous-data out label str :parse-escapes t))
 
   (format out "~%  ;; --- GLOBALS ---~%")
   (loop for label in *global-vars* do
