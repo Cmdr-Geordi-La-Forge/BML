@@ -2,14 +2,14 @@
   '( add  sub  mul  div   ; Integer math
     fadd fsub fmul fdiv   ; Float math (SSE)
     cons                  ; List/Env ops
-    print-int  print-hex print-char print-chunk
+    putint puthex putchar putchunk
     peek poke
-    alloc peek-idx poke-idx
+    alloc peekidx pokeidx
     eql lt gt
-    read-char itof
+    getchar itof
     and or
-    ash logand logior not
-    get-heap set-heap poke-byte)
+    ash logand logior
+    getheap setheap pokebyte not)
   "Standard assembly mnemonics mapping 1-to-1 with hardware instructions.")
 
 (defvar *used-symbols* nil)
@@ -27,27 +27,27 @@
     (when in
       (let ((current-op nil)
             (current-asm nil))
-        (loop for line = (read-line in nil nil)
-              while line do
-              ;; Ensure line is not empty AND does not start with a comment ';'
-              (when (and (> (length line) 0) 
-                         (not (char= (char line 0) #\;)))
-                (if (char= (char line 0) #\Tab)
-                    ;; It is a tabbed instruction
-                    (when current-op
-                      (push (format nil "  ~a~%" (string-trim '(#\Tab #\Space #\Return) line)) current-asm))
-                    ;; It is a new label definition
-                    (let ((colon-pos (position #\: line)))
-                      (when colon-pos ; Ensure the colon actually exists
+        (loop for raw-line = (read-line in nil nil)
+              while raw-line do
+              ;; Aggressively strip ALL whitespace from the edges
+              (let ((line (string-trim '(#\Space #\Tab #\Return) raw-line)))
+                (when (and (> (length line) 0) 
+                           (not (char= (char line 0) #\;)))
+                  (let ((colon-pos (position #\: line)))
+                    (if colon-pos
+                        ;; 1. We found a colon: It's a new label!
                         (let* ((op-str (subseq line 0 colon-pos))
                                (rest-str (subseq line (1+ colon-pos))))
                           (when current-op
                             (push (cons current-op (reverse current-asm)) *primitives-asm*))
-                          (setf current-op (intern (string-upcase op-str)))
+                          (setf current-op (intern (string-upcase (string-trim '(#\Space #\Tab) op-str))))
                           (setf current-asm nil)
-                          (let ((trimmed-rest (string-trim '(#\Tab #\Space #\Return) rest-str)))
+                          (let ((trimmed-rest (string-trim '(#\Space #\Tab) rest-str)))
                             (when (> (length trimmed-rest) 0)
-                              (push (format nil "  ~a~%" trimmed-rest) current-asm)))))))))
+                              (push (format nil "  ~a~%" trimmed-rest) current-asm))))
+                        ;; 2. No colon: It must be an instruction!
+                        (when current-op
+                          (push (format nil "  ~a~%" line) current-asm)))))))
         (when current-op
           (push (cons current-op (reverse current-asm)) *primitives-asm*))))))
 
@@ -59,10 +59,6 @@
         (let ((label (string-left-trim "#:" (symbol-name (gensym "FLT_")))))
           (push (cons val label) *used-floats*)
           label))))
-
-(defun fasm-label (sym)
-  "Converts a Lisp symbol into a valid FASM identifier."
-  (map 'string (lambda (c) (if (alphanumericp c) c #\_)) (symbol-name sym)))
 
 (defun reset-compiler-state ()
   (setf *symbols* nil
@@ -169,11 +165,11 @@
 
         (cond
           ;; nullary
-          ((member op '(read-char get-heap))
+          ((member op '(getchar getheap))
            (or (emit-template) (error "Missing template for ~a" op)))
 
           ;; unary
-          ((member op '(print-int print-hex print-char print-chunk peek itof alloc set-heap not))
+          ((member op '(putint puthex putchar putchunk peek itof alloc setheap not))
            (format out "~a" (compile-expr (first args) comp-env nil parent-arity))
            (or (emit-template) (error "Missing template for ~a" op)))
 
@@ -211,7 +207,7 @@
                            (t (fallback))))))))
 
           ;; 2. Strict Binary
-          ((member op '(cons poke eql lt gt ash peek-idx poke-byte))
+          ((member op '(cons poke eql lt gt ash peekidx pokebyte))
            (let* ((arg1 (first args))
                   (arg2 (second args))
                   (arg2-int-p (integerp arg2)))
@@ -241,7 +237,7 @@
                  (t (fallback))))))
 
           ;; tertiary
-          ((member op '(poke-idx))
+          ((member op '(pokeidx))
            (format out "~a" (compile-expr (first args) comp-env nil parent-arity))
            (format out "  push rax~%")
            (format out "~a" (compile-expr (second args) comp-env nil parent-arity))
@@ -322,15 +318,12 @@
                     (loop for i from 0 below (length str) collect (char-code (char str i)))))
          (len (length bytes)))
     (format out "align 8~%")
-    ;; Tighter header formatting
     (format out "~a: dq ~a_data, ~a~%" label label len)
     (format out "~a_data:~%" label)
     (when (> len 0)
       (format out "  db ")
       (let ((state 0)) ; 0=start, 1=in-str, 2=out-str
         (loop for byte in bytes do
-              ;; ASCII 34 is the double quote ("). We treat it as non-printable 
-              ;; so it safely prints as an int without breaking our string literal!
               (let ((is-printable (and (>= byte 32) (<= byte 126) (/= byte 34))))
                 (if is-printable
                     (case state
@@ -341,7 +334,6 @@
                       (0 (format out "~a" byte) (setf state 2))
                       (1 (format out "\", ~a" byte) (setf state 2))
                       (2 (format out ", ~a" byte))))))
-        ;; Close the quote if we ended while inside a string
         (when (= state 1)
           (format out "\"")))
       (format out "~%"))))
@@ -401,7 +393,7 @@
   (format out "~%  ;; --- SYMBOLS ---~%")
   (loop for sym in *used-symbols*
         for str = (symbol-name sym)
-        for safe-name = (format nil "sym_~a" (fasm-label sym))
+        for safe-name = (format nil "sym_~a" (symbol-name sym))
         do (emit-contiguous-data out safe-name str :parse-escapes nil))
 
   (format out "~%  ;; --- STRINGS ---~%")
@@ -410,6 +402,7 @@
 
   (format out "~%  ;; --- GLOBALS ---~%")
   (loop for label in *global-vars* do
+        (format out "align 8~%")
         (format out "~a: dq 0~%" label))
 
   (format out "~%  ;; Uninitialized heap memory requested from OS~%")
@@ -604,14 +597,14 @@
       ;; PASS 1: Forward Declarations! (Register every label first)
       (loop for binding in bindings
             for var = (first binding)
-            for label = (format nil "global_~a" (fasm-label var)) do
+            for label = (format nil "global_~a" (symbol-name var)) do
             (push label *global-vars*)
             (push (cons var label) global-env))
 
       ;; PASS 2: Compile the values using the fully populated environment!
       (loop for binding in bindings
             for val = (second binding)
-            for label = (format nil "global_~a" (fasm-label (first binding))) do
+            for label = (format nil "global_~a" (symbol-name (first binding))) do
             (format out "~a" (compile-expr val global-env nil 0))
             (format out "  mov [~a], rax~%" label))
 
