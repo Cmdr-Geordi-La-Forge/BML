@@ -19,6 +19,7 @@
 (defvar *label-counter* 0 "Counter for generating safe labels.")
 (defvar *primitives-asm* nil "Alist of dynamic assembly templates.")
 (defvar *global-vars* nil "List of labels to allocate in .bss")
+(defvar *global-env* nil "Alist mapping global variables to labels.")
 (defvar *hoisted-functions* nil "List of raw assembly strings for compiled lambdas.")
 
 (defun load-primitives-asm (filepath)
@@ -590,43 +591,40 @@
     (t (error "Compiler error: Unrecognized expression type: ~a" expr))))
 
 (defun compile-global-let (bindings body)
-  (let ((global-env nil))
-    (with-output-to-string (out)
-      (format out "  ;; --- INITIALIZE GLOBALS ---~%")
+  (with-output-to-string (out)
+    (format out "  ;; --- INITIALIZE GLOBALS ---~%")
 
-      ;; PASS 1: Forward Declarations! (Register every label first)
-      (loop for binding in bindings
-            for var = (first binding)
-            for label = (format nil "global_~a" (symbol-name var)) do
-            (push label *global-vars*)
-            (push (cons var label) global-env))
+    ;; PASS 1: Forward Declarations! (Register every label first)
+    (loop for binding in bindings
+          for var = (first binding)
+          for label = (format nil "global_~a" (symbol-name var)) do
+          (push label *global-vars*)
+          (push (cons var label) *global-env*)) ; <-- Mutates the persistent environment!
 
-      ;; PASS 2: Compile the values using the fully populated environment!
-      (loop for binding in bindings
-            for val = (second binding)
-            for label = (format nil "global_~a" (symbol-name (first binding))) do
-            (format out "~a" (compile-expr val global-env nil 0))
-            (format out "  mov [~a], rax~%" label))
+    ;; PASS 2: Compile the values using the fully populated environment!
+    (loop for binding in bindings
+          for val = (second binding)
+          for label = (format nil "global_~a" (symbol-name (first binding))) do
+          (format out "~a" (compile-expr val *global-env* nil 0))
+          (format out "  mov [~a], rax~%" label))
 
-      (format out "  ;; --- MAIN EXECUTION ---~%")
-      (loop for stmt in body do
-            (format out "~a" (compile-expr stmt global-env nil 0))))))
+    (format out "  ;; --- MAIN EXECUTION ---~%")
+    (loop for stmt in body do
+          (format out "~a" (compile-expr stmt *global-env* nil 0)))))
 
 (defun compile-program (ast filepath)
   (let ((*used-symbols* nil)
         (*used-floats* nil)
-        (*hoisted-functions* nil) ; Reset state
-        (*global-vars* nil))
+        (*hoisted-functions* nil) 
+        (*global-vars* nil)
+        (*global-env* nil))       ; <-- Reset the environment per program
 
     (load-primitives-asm "primitives.asm")
 
     (with-open-file (out filepath :direction :output :if-exists :supersede)
       (format out "format ELF64 executable 3~%")
-
-      ;; --- 1. CODE SECTION ---
       (format out "segment readable executable~%")
       (format out "include 'runtime.asm'~%~%")
-
       (format out "entry _start~%")
       (format out "_start:~%")
       (format out "  push rbp~%")
@@ -635,35 +633,31 @@
 
       ;; Iterate through all top-level nodes (implicit sequence)
       (loop for raw-expr in ast for expanded = (expand-macro raw-expr) do
-
-        ;; Intercept top-level 'let' blocks and treat them as global envs!
         (if (and (consp expanded) (eq (car expanded) 'let))
             (format out "~a" (compile-global-let (second expanded)
                                                  (cddr expanded)))
-
-            ;; Otherwise, compile it as a normal top-level expression
-            (format out "~a~%" (compile-expr expanded nil))))
+            (format out "~a~%" (compile-expr expanded *global-env*)))) ; <-- Pass *global-env* here
 
       ;; System Exit
       (format out "  mov rdi, rax~%")
       (format out "  mov rax, 60~%")
       (format out "  syscall~%~%")
       
-      ;; Emit hoisted lambdas AFTER exit, keeping execution flow clean!
+      ;; Emit hoisted lambdas AFTER exit
       (format out "  ;; --- COMPILED FUNCTIONS ---~%")
       (loop for func-asm in (reverse *hoisted-functions*) do
             (format out "~a~%" func-asm))
       
-      ;; --- 2. DATA SECTION ---
       (emit-data-section out))))
 
-(defun build-program (input-filepath output-filepath)
-  "Reads a Lisp source file and compiles it into a FASM executable."
-  (let ((ast (with-open-file (in input-filepath :direction :input)
-                (loop for expr = (read in nil :eof)
-                      until (eq expr :eof)
-                      collect expr))))
-    ;; Pass the raw list of expressions directly! No more wrapping in begin!
+(defun build-program (input-filepaths output-filepath)
+  "Reads multiple Lisp source files and compiles them into a single FASM executable."
+  (let ((ast (loop for filepath in input-filepaths
+                   append (with-open-file (in filepath :direction :input)
+                            (loop for expr = (read in nil :eof)
+                                  until (eq expr :eof)
+                                  collect expr)))))
     (compile-program ast output-filepath)))
 
-(build-program "boot.lisp" "boot.fasm")
+;; Feed both files to build step 1
+(build-program '("stdlib.lisp" "boot.lisp") "boot.fasm")
