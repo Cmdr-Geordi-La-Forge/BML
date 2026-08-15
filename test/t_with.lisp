@@ -1,12 +1,3 @@
-;; 1. Define the scoped memory arena macro
-(defmacro (with expr)
-  (cons (quote let)
-        (cons (cons (cons (quote oldh) (cons (cons (quote getheap) 0) 0))
-                    (cons (cons (quote res) (cons expr 0)) 0))
-              (cons (cons (quote setheap) (cons (quote oldh) 0))
-                    (cons (quote res) 0)))))
-
-;; 2. Test it!
 (let ((h1 (getheap))
       
       ;; Execute a block inside the arena that allocates 100 blocks of memory

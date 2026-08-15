@@ -1,3 +1,10 @@
+(defmacro (with expr)
+  (cons (quote let)
+        (cons (cons (cons (quote oldh) (cons (cons (quote getheap) 0) 0))
+                    (cons (cons (quote res) (cons expr 0)) 0))
+              (cons (cons (quote setheap) (cons (quote oldh) 0))
+                    (cons (quote res) 0)))))
+
 (let (
   (sfcar (lambda (l) (if (eql l 0) 0 (car l))))
   (sfcdr (lambda (l) (if (eql l 0) 0 (cdr l))))

@@ -186,6 +186,14 @@
                  ((eql symint (car binding)) (cdr binding)) 
                  (1 (lkenv symint (cdr env)))))))))
 
+      (evlet (lambda (bnds env)
+        (cond ((eql bnds 0) env)
+              (1 (let ((bndlst (cdr (car bnds))))
+                   (evlet (cdr bnds)
+                          (cons (cons (cdr (car bndlst)) 
+                                      (evalast (car (cdr bndlst)) env))
+                                env)))))))
+
       (evalast (lambda (ast env)
         (cond
           ((eql ast 0) 0)
@@ -203,6 +211,14 @@
                       ((symeq funcname "cons") (cons (evalast (car args) env) (evalast (car (cdr args)) env)))
                       ((symeq funcname "eql") (cond ((eql (evalast (car args) env) (evalast (car (cdr args)) env)) 1) (1 0)))
                       ((symeq funcname "if") (cond ((evalast (car args) env) (evalast (car (cdr args)) env)) (1 (evalast (car (cdr (cdr args))) env))))
+                      ;; --- NEW: Math & Let Bindings for Macros ---
+                      ((symeq funcname "add") (add (evalast (car args) env) (evalast (car (cdr args)) env)))
+                      ((symeq funcname "sub") (sub (evalast (car args) env) (evalast (car (cdr args)) env)))
+                      ((symeq funcname "mul") (mul (evalast (car args) env) (evalast (car (cdr args)) env)))
+                      ((symeq funcname "div") (div (evalast (car args) env) (evalast (car (cdr args)) env)))
+                      ((symeq funcname "ash") (ash (evalast (car args) env) (evalast (car (cdr args)) env)))
+                      ((symeq funcname "let") (evalast (car (cdr args)) (evlet (cdr (car args)) env)))
+                      ;; -------------------------------------------
                       (1 0))))
                  (1 0)))))))
 
@@ -640,7 +656,15 @@
                  ((eql tag 1) 
                   (let ((offset (lkenv val compenv)))
                     (cond
-                      ((eql offset 0) (putstr "  ;; global lookup") (putchar 10) (emitglob val) (putline "  mov rax, [rdi]"))
+                      ((eql offset 0) 
+                       ;; --- NEW: Zero-overhead unbound variable trap ---
+                       (cond ((lksymi val (peek globtab))
+                              (putstr "  ;; global lookup") (putchar 10) 
+                              (emitglob val) (putline "  mov rax, [rdi]"))
+                             (1 
+                              (putstr "ERROR: UNBOUND VARIABLE ") (putsym val) (putchar 10) 
+                              (exit 1))))
+                      ;; -------------------------------------------------
                       ((gt offset 0) (putstr "  ;; arg lookup") (putchar 10) (putstr "  mov rax, [rbp + ") (putint offset) (putline "]"))
                       (1 (putstr "  ;; local lookup") (putchar 10) (putstr "  mov rax, [rbp - ") (putint (sub 0 offset)) (putline "]")))))
                  ((eql tag 2) (cmplist val compenv istail pararity))
@@ -655,7 +679,7 @@
                ((eql (car funcnode) 1) (cond ((symeq (cdr funcnode) "let") (cmpglet (cdr val) 0)) (1 (cmpexpr ast 0 0 0))))
                (1 (cmpexpr ast 0 0 0)))))
           (1 (cmpexpr ast 0 0 0)))))
-          
+      
       (cmploop (lambda ()
         (let ((rawast (prsexpr)))
           (cond

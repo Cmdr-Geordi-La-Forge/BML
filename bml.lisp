@@ -5,7 +5,7 @@
     putint puthex putchar putchunk
     peek poke
     alloc peekidx pokeidx
-    eql lt gt
+    eql lt gt le ge
     getchar itof
     and or
     ash logand logior
@@ -21,6 +21,7 @@
 (defvar *global-vars* nil "List of labels to allocate in .bss")
 (defvar *global-env* nil "Alist mapping global variables to labels.")
 (defvar *hoisted-functions* nil "List of raw assembly strings for compiled lambdas.")
+(defvar *macenv* nil "Alist mapping user-defined macros to their AST definitions.")
 
 (defun load-primitives-asm (filepath)
   (setf *primitives-asm* nil)
@@ -208,7 +209,7 @@
                            (t (fallback))))))))
 
           ;; 2. Strict Binary
-          ((member op '(cons poke eql lt gt ash peekidx pokebyte))
+          ((member op '(cons poke eql lt gt le ge ash peekidx pokebyte))
            (let* ((arg1 (first args))
                   (arg2 (second args))
                   (arg2-int-p (integerp arg2)))
@@ -339,49 +340,101 @@
           (format out "\"")))
       (format out "~%"))))
 
+(defun mini-eval (ast env)
+  "A compile-time interpreter to execute macro definitions."
+  (cond
+    ((null ast) nil)
+    ((integerp ast) ast)
+    ((stringp ast) ast)
+    ((symbolp ast)
+     (let ((b (assoc ast env)))
+       (if b (cdr b) (error "mini-eval: unbound variable ~a" ast))))
+    ((consp ast)
+     (let ((func (car ast))
+           (args (cdr ast)))
+       (case func
+         (quote (car args))
+         
+         ;; Translate 0 to nil for safe traversal
+         (car (let ((lst (mini-eval (car args) env))) (if (null lst) 0 (car lst))))
+         (cdr (let ((lst (mini-eval (car args) env))) (if (null lst) 0 (cdr lst))))
+         
+         (cons
+          (let ((a (mini-eval (car args) env))
+                (d (mini-eval (second args) env)))
+            ;; MAGIC TRICK: If the cdr is 0, make it nil so it forms a proper CL list!
+            (cons a (if (eql d 0) nil d))))
+            
+         (eql (if (eql (mini-eval (car args) env) (mini-eval (second args) env)) 1 0))
+         (if (if (not (eql 0 (mini-eval (car args) env)))
+                 (mini-eval (second args) env)
+                 (mini-eval (third args) env)))
+         (add (+ (mini-eval (car args) env) (mini-eval (second args) env)))
+         (sub (- (mini-eval (car args) env) (mini-eval (second args) env)))
+         (mul (* (mini-eval (car args) env) (mini-eval (second args) env)))
+         (div (truncate (mini-eval (car args) env) (mini-eval (second args) env)))
+         (ash (ash (mini-eval (car args) env) (mini-eval (second args) env)))
+         (let (let* ((bindings (car args))
+                     (new-env (copy-alist env)))
+                (dolist (b bindings)
+                  (push (cons (first b) (mini-eval (second b) new-env)) new-env))
+                (mini-eval (second args) new-env)))
+         (otherwise (error "mini-eval unsupported function ~a" func)))))
+    (t ast)))
+
+(defun expand-macro-list (lst)
+  "Recursively expands a list, gracefully dropping omitted nodes (like defmacro)."
+  (loop for item in lst
+        for expanded = (expand-macro item)
+        when expanded
+        collect expanded))
+
 (defun expand-macro (expr)
-  "Expands syntactic sugar down into our native special forms."
+  "Expands syntactic sugar and dynamic defmacros down into our native special forms."
   (if (not (consp expr))
       expr
-      (let ((head (car expr)))
-        (case head
+      (let* ((head (car expr))
+             (mdef (assoc head *macenv*)))
+        (if mdef
+            ;; 1. User-Defined Macro! Evaluate it, then recursively expand the result.
+            (let* ((params (second mdef))
+                   (body (third mdef))
+                   (env (pairlis params (cdr expr))))
+              (expand-macro (mini-eval body env)))
+            
+            ;; 2. Standard Syntactic Sugar & Special Forms
+            (case head
+              (defmacro
+               (let* ((sig (second expr))
+                      (name (first sig))
+                      (params (rest sig))
+                      (body (third expr)))
+                 (push (list name params body) *macenv*)
+                 nil)) ;; Return nil to completely drop the defmacro from Code Gen
 
-          ;; (le a b) -> (not (gt a b)) -> (if (gt a b) 0 1)
-          (le `(if (gt ,(expand-macro (second expr)) ,(expand-macro (third expr))) 0 1))
-
-          ;; (ge a b) -> (not (lt a b)) -> (if (lt a b) 0 1)
-          (ge `(if (lt ,(expand-macro (second expr)) ,(expand-macro (third expr))) 0 1))
-
-          ;; (if cnd thn els) -> pure sugar for a cond block!
-          (if
-           `(cond (,(expand-macro (second expr)) ,(expand-macro (third expr)))
-                  (1 ,(expand-macro (fourth expr)))))
-
-          ;; (defun name (args) body) -> pure sugar for let + lambda!
-          (defun
-           (let ((name (second expr))
-                 (args (third expr))
-                 (body (cdddr expr)))
-             (expand-macro `(let ((,name (lambda ,args ,@body)))))))
-
-          ;; (lambda (args) body) -> expands to implicit lambda syntax
-          (lambda
-           `(,(second expr) (1 ,@(mapcar #'expand-macro (cddr expr)))))
-
-          ;; (cond ...), (let ...) just recursively expand their bodies
-          (cond  `(cond ,@(mapcar (lambda (c) (mapcar #'expand-macro c)) (cdr expr))))
-          ;; (let   `(let ,(second expr) ,@(mapcar #'expand-macro (cddr expr))))
-          (let
-           (let ((bindings (second expr))
-                 (body (cddr expr)))
-             ;; FIX: Recursively expand the values inside the let bindings!
-             `(let ,(mapcar (lambda (b)
-                              (list (first b) (expand-macro (second b))))
-                            bindings)
-                ,@(mapcar #'expand-macro body))))
-
-          (otherwise
-           (mapcar #'expand-macro expr))))))
+              (le `(if (gt ,(expand-macro (second expr)) ,(expand-macro (third expr))) 0 1))
+              (ge `(if (lt ,(expand-macro (second expr)) ,(expand-macro (third expr))) 0 1))
+              (if `(cond (,(expand-macro (second expr)) ,(expand-macro (third expr)))
+                         (1 ,(expand-macro (fourth expr)))))
+              (defun
+               (let ((name (second expr))
+                     (args (third expr))
+                     (body (cdddr expr)))
+                 (expand-macro `(let ((,name (lambda ,args ,@body)))))))
+              (lambda
+               `(,(second expr) (1 ,@(expand-macro-list (cddr expr)))))
+              (cond `(cond ,@(mapcar (lambda (c) (expand-macro-list c)) (cdr expr))))
+              (let
+               (let ((bindings (second expr))
+                     (body (cddr expr)))
+                 `(let ,(loop for b in bindings
+                              for exp-val = (expand-macro (second b))
+                              when exp-val collect (list (first b) exp-val))
+                    ,@(expand-macro-list body))))
+              (quote expr) ;; Do NOT expand inside quotes!
+              
+              ;; 3. Standard calls
+              (otherwise (expand-macro-list expr)))))))
 
 (defun emit-data-section (out)
   "Generates floats, symbols, string literals, and globals in the data segment."
@@ -475,7 +528,7 @@
     ((floatp   expr) (compile-float-literal expr))
     ((stringp  expr) (compile-string-literal expr))
     ((symbolp  expr) (compile-lookup expr comp-env))
-    ((consp expr)
+    ((consp    expr)
      (let ((head (car expr)))
        (cond
          ;; 1. Syscall Special Form
@@ -580,11 +633,18 @@
          ((and (symbolp head) (member head *primitives*))
           (compile-inline-primitive expr comp-env parent-arity))
 
-         ;; 7.5 Dynamic c[ad]+r
+         ;; 8. Dynamic c[ad]+r
          ((and (symbolp head) (is-cadr-sym head))
           (compile-cadr expr comp-env parent-arity))
 
-         ;; 8. Standard Function Application
+         ;; 9. quote
+         ((eq head 'quote)
+          (let ((arg (cadr expr)))
+            (if (symbolp arg)
+                (format nil "  mov rax, ~a~%" (pack-symbol arg))
+                (compile-expr arg comp-env)))) ; If it's a number/string, just compile it normally
+
+         ;; 10. Standard Function Application
          (t
           (compile-apply expr comp-env tail-p parent-arity)))))
 
@@ -617,7 +677,8 @@
         (*used-floats* nil)
         (*hoisted-functions* nil) 
         (*global-vars* nil)
-        (*global-env* nil))       ; <-- Reset the environment per program
+        (*global-env* nil)
+        (*macenv* nil))
 
     (load-primitives-asm "primitives.asm")
 
@@ -631,12 +692,12 @@
       (format out "  mov rbp, rsp~%")
       (format out "  lea r15, [heap_start]~%~%")
 
-      ;; Iterate through all top-level nodes (implicit sequence)
-      (loop for raw-expr in ast for expanded = (expand-macro raw-expr) do
+      (loop for raw-expr in ast
+          for expanded = (expand-macro raw-expr) do ;; <-- Fixed: expand-macro
+      (when expanded
         (if (and (consp expanded) (eq (car expanded) 'let))
-            (format out "~a" (compile-global-let (second expanded)
-                                                 (cddr expanded)))
-            (format out "~a~%" (compile-expr expanded *global-env*)))) ; <-- Pass *global-env* here
+            (format out "~a" (compile-global-let (second expanded) (cddr expanded)))
+            (format out "~a~%" (compile-expr expanded *global-env*)))))
 
       ;; System Exit
       (format out "  mov rdi, rax~%")
