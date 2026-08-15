@@ -6,11 +6,11 @@ A completely self-hosting, lexically-scoped Lisp compiler that targets raw x86-6
 
 Bare-Metal Lisp bypasses traditional C dependencies, LLVM IRs, and virtual machines. It is a streamlined compiler that reads Abstract Syntax Trees (AST), resolves a Turing-complete macro expansion pass, and instantly emits native `ELF64` FASM instructions. 
 
-[👉 Read the development journey up until singularity and AI pairing chat here] *(https://share.gemini.google/DSdvvf4BaXrP)*
+[👉 Read the development journey up until singularity and AI pairing chat here](https://share.gemini.google/DSdvvf4BaXrP)
 
-[👉 Shortening symbol names and JIT idea discussion] *(https://share.gemini.google/7wLaCL0Rq7RC)*
+[👉 Shortening symbol names and JIT idea discussion](https://share.gemini.google/7wLaCL0Rq7RC)
 
-[👉 Read the JIT-Architecture and Macro Engine overhaul chat here] *(https://share.gemini.google/JINv4il7VjK6)*
+[👉 Read the JIT-Architecture and Macro Engine overhaul chat here](https://share.gemini.google/JINv4il7VjK6)
 
 ## Core Philosophy & Architectural Features
 
