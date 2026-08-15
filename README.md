@@ -2,42 +2,35 @@
 
 ![Project Logo](./assets/logo.svg)
 
-A completely self-hosting, dynamically-scoped Lisp compiler that targets raw x86-64 Linux assembly. Built from scratch in ~18 hours.
+A completely self-hosting, lexically-scoped Lisp compiler that targets raw x86-64 Linux assembly. Built from scratch and iteratively upgraded into a high-performance systems language.
 
-Bare-Metal Lisp bypasses traditional C dependencies, LLVM IRs, and virtual machines. It is a single-pass compiler that reads Abstract Syntax Trees (AST) and instantly emits native `ELF64` FASM instructions. It features an untyped memory model where data, code, pointers, and booleans are mathematically unified.
+Bare-Metal Lisp bypasses traditional C dependencies, LLVM IRs, and virtual machines. It is a streamlined compiler that reads Abstract Syntax Trees (AST), resolves a Turing-complete macro expansion pass, and instantly emits native `ELF64` FASM instructions. 
 
-[👉 Read the full 18-hour development journey and AI pairing chat here] *(https://share.gemini.google/DSdvvf4BaXrP)*
+[👉 Read the development journey up until singularity and AI pairing chat here] *(https://share.gemini.google/DSdvvf4BaXrP)*
+[👉 Shortening symbol names and JIT idea discussion] *(https://share.gemini.google/7wLaCL0Rq7RC)*
+[👉 Read the JIT-Architecture and Macro Engine overhaul chat here] *(https://share.gemini.google/JINv4il7VjK6)*
 
-## Core Philosophy & Features
+## Core Philosophy & Architectural Features
 
-### 1. The Untyped Singularity (1:1 Hardware Translation)
-There are no software data types. The hardware is the type system. Every variable, pointer, and literal is strictly a raw 64-bit integer.
-Because the architecture is untyped, logical concepts are mathematically unified: `0`, `()`, `nil`, and `false` are literally just the 64-bit integer `0`. The compiler translates operations into bare-metal x86-64 hardware instructions (`add` becomes `add rax, rcx`, `car` becomes `mov rax, [rax]`).
+### 1. The Untyped Singularity & Hardware Mapping
+There are no software data types. The hardware is the type system. Every variable, pointer, and literal is strictly a raw 64-bit integer, with native support for x86-64 SSE registers for floating-point operations.
+Because the architecture is untyped, logical concepts are mathematically unified: `0`, `()`, `nil`, and `false` are literally just the 64-bit integer `0`. The compiler translates operations directly into bare-metal x86-64 hardware instructions (`add` becomes `add rax, rcx`, `car` becomes `mov rax, [rax]`). Dynamic composition of `c[ad]+r` functions (like `caddr`) is recursively compiled into inline memory dereferences.
 
-### 2. Multi-Level Homoiconicity
-Lisp's famous "code is data" philosophy is taken to the absolute extreme:
-* The AST is the Control Flow: There is no separate main or global state. The entire program is just one giant function application.
-* The Syntax is the Data: Homoiconicity at its finest. The Lisp lists you write map directly to the execution structure.
-* The Environment is the Call Stack: By moving dynamic bindings off the heap and directly into the RBP frame, local variables become zero-cost abstractions that clean themselves up instantly.
-* Strings: There is no standard string type. Strings and symbols are stored as linked lists of 8-byte chunks (64-bit integers), seamlessly fitting into the exact same memory model as the AST. 
+### 2. Lexical Scoping & C ABI Compatibility
+We matured past dynamic environment lookups. Variables are resolved lexically at compile-time and mapped directly to hardware stack frame offsets (`rbp - X` for locals, `rbp + X` for arguments).
+Furthermore, functions strictly adhere to the System V AMD64 ABI. Function arguments are passed via hardware registers (`rdi`, `rsi`, `rdx`, `rcx`, `r8`, `r9`) before spilling to the stack, making BML natively interoperable with C libraries and Linux kernel syscalls.
 
-### 3. Dynamic Scoping
-Variables are resolved dynamically on the active call stack at runtime. There are no lexical closures or complex environment captures. If a function needs a variable, it asks the CPU to walk backwards down the execution stack until it finds it. This elegantly permits mutual recursion without forward declarations.
+### 3. Hardware Tail-Call Elimination (TCE)
+BML guarantees zero-overhead recursion. If a function call is in the tail position, the compiler destroys the current stack frame and emits a raw hardware `jmp rax` instead of a `call`. This allows infinite state-machine loops and recursive functions (like `sumto`) without ever blowing out the call stack.
 
-### 4. Single-Pass Compilation & Inline Data
-The bootstrapped compiler evaluates and compiles simultaneously. To handle strings and variables without a multi-pass data collection step, the compiler uses an **Inline Data Jump** hack. It injects memory chunks directly into the execution flow and instructs the CPU to physically jump over them:
-```fasm
-  jmp SYM_AFTER_1
-SYM_1_0:
-  dq 8026308904485020012
-  dq 0
-SYM_AFTER_1:
-  lea rdi, [SYM_1_0]
-```
+### 4. Turing-Complete AST Rewriter (Macros)
+The compiler features a fully isolated, pure AST rewriter pass. Using `defmacro`, developers can write compile-time metaprograms. The internal compile-time interpreter (`evalast` / `mini-eval`) is Turing-complete, supporting recursive macro expansion, compile-time arithmetic, and local `let` bindings. 
 
-### 5. Perfect Bootstrapping Stabilization
-The compiler is proven to be perfectly stable via the Stage 3 Bootstrapping validation. 
-`boot2.fasm` (Stage 2, compiled by the host environment) and `boot3.fasm` (Stage 3, compiled by Stage 2 itself) produce a 100% empty `diff`.
+### 5. Zero-Overhead Scoped Memory Arenas
+Memory is managed via a blisteringly fast bump allocator on register `r15`. Using the `with` macro, developers can create scoped memory arenas that capture the `r15` pointer, execute a block of heavily allocating code, and instantly restore the pointer upon exit, freeing all memory in `O(1)` time.
+
+### 6. Fail-Fast Compilation
+The code generator strictly tracks global environments and local stack frames. Referencing an unbound variable immediately halts compilation with a zero-overhead compile-time error, preventing illegal instructions or segfaults in the resulting executable.
 
 ---
 
@@ -46,40 +39,43 @@ The compiler is proven to be perfectly stable via the Stage 3 Bootstrapping vali
 ### Memory Model
 *   **Heap:** A statically allocated 8MB uninitialized heap (`rb 1024 * 1024 * 8`).
 *   **Cons Cells:** 16-byte pairs. The `car` is at `[ptr]`, the `cdr` is at `[ptr+8]`.
-*   **Stack:** Pure x86-64 hardware stack, used for dynamic variable environment (`push r14`).
+*   **Data Segments:** Strings, symbols, and global variables are cleanly hoisted and emitted into a standard `segment readable writeable` ELF64 data block.
 
 ### Syntax & Special Forms
 *   `(...)` - List definition / Function application
-*   `"..."` - String literal (compiles to a linked list of 8-byte chunks)
+*   `"..."` - String literal (allocates a contiguous byte-array in the data segment)
 *   `; ...` - Single-line comment
 *   `(let ((var1 val1) (var2 val2)) body)` - Sequential stack allocation.
-*   `(if condition then else)` - Native branching using `test rax, rax` and `jz`.
-*   `(begin stmt1 stmt2 ...)` - Sequential evaluation.
-*   `(lambda (arg1 arg2) body)` - Anonymous function definition.
+*   `(cond (cnd1 thn1) (1 els))` - Native branching. Translates to efficient `test rax, rax` and `jz` jump chains.
+*   `(if condition then else)` - Syntactic sugar for `cond`.
+*   `(lambda (args) body)` - Anonymous function definition. Implicitly treats the body as a sequence.
+*   `(defmacro (name args) body)` - Compile-time AST manipulation.
+*   `(with expr)` - Scoped memory arena execution.
 
 ### Hardware Primitives
 The following functions map perfectly to their respective x86-64 assembly instructions or runtime syscalls:
 
 **Memory / Pointers:**
-*   `(cons a b)` - Allocates 16 bytes on the heap and returns the pointer.
-*   `(car lst)` / `(peek ptr)` - Dereferences memory: `mov rax, [rax]`
-*   `(cdr lst)` - Dereferences memory + offset: `mov rax, [rax+8]`
-*   `(poke ptr val)` - Mutates memory at pointer: `mov [rcx], rax`
+*   `(cons a b)` - Allocates 16 bytes on the `r15` heap and returns the pointer.
+*   `(car lst)` / `(peek ptr)` - Dereferences memory: `mov rax, [rax]`.
+*   `(cdr lst)` - Dereferences memory + offset: `mov rax, [rax+8]`.
+*   `(poke ptr val)` - Mutates memory at pointer: `mov [rax], rcx`.
+*   `(pokeidx ptr idx val)` / `(peekidx ptr idx)` - Contiguous array access.
 
-**Math (64-bit Integer):**
-*   `(add a b)`, `(sub a b)`, `(mul a b)`, `(div a b)`
-
-**Logical / Relational:**
-*   `(and a b)` / `(or a b)` - Pure inline bitwise logic (`and rax, rcx`, `or rax, rcx`) used for fast short-circuiting.
-*   `(logior a b)` - Bitwise OR.
-*   `(ash val count)` - Arithmetic shift left/right.
+**Math & Logic (64-bit Integer):**
+*   `(add a b)`, `(sub a b)`, `(mul a b)`, `(div a b)`.
+*   `(and a b)`, `(or a b)`, `(logand a b)`, `(logior a b)` - Pure inline bitwise logic.
+*   `(ash val count)` - Arithmetic shift left/right (`shl`, `sar`).
 *   `(eql a b)`, `(lt a b)`, `(gt a b)`, `(le a b)`, `(ge a b)` - Evaluates to `1` or `0`.
 
+**Floating Point (SSE):**
+*   `(fadd a b)`, `(fsub a b)`, `(fmul a b)`, `(fdiv a b)` - Maps to `addsd`, `subsd`, etc.
+*   `(itof a)` - Converts integer to float (`cvtsi2sd`).
+
 **I/O (Syscalls):**
-*   `(read-char)` - Reads a single ASCII character from `stdin`.
-*   `(print-char c)` - Prints an ASCII character to `stdout`.
-*   `(print-int n)` - Prints a base-10 integer to `stdout`.
-*   `(print-chunk c)` - Prints a raw 8-byte integer chunk as ASCII text.
+*   `(syscall num arg1 arg2 ...)` - Native Linux CFFI bridge. Maps up to 6 arguments to registers, automatically handling the `rcx` to `r10` translation required by the Linux kernel.
+*   `(getchar)` - Reads a single ASCII character from `stdin`.
+*   `(putchar c)`, `(putint n)`, `(puthex n)` - Standard output streams.
 
 ---
 
@@ -95,15 +91,20 @@ fasm boot.fasm
 ```
 
 **2. The Singularity (Stage 2)**
-Pipe the compiler's source code into its own compiled binary. It will compile itself without the host language:
+Pipe the compiler's standard library and source code into its own compiled binary. It will compile itself without the host language:
 ```bash
-cat boot.lisp | ./boot > boot2.fasm
+cat stdlib.lisp boot.lisp | ./boot > boot2.fasm
 fasm boot2.fasm
 ```
 
-**3. Validation (Stage 3)**
+**3. Validation (Stage 3 & Test Suite)**
 Prove that the compiler is perfectly self-hosted by compiling it again using Stage 2. The output must be identical:
 ```bash
-cat boot.lisp | ./boot2 > boot3.fasm
+cat stdlib.lisp boot.lisp | ./boot2 > boot3.fasm
 diff boot2.fasm boot3.fasm
+```
+
+Execute the full regression test suite to validate macro expansions, TCE, and hardware logic:
+```bash
+./test.sh
 ```
