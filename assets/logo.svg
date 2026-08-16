@@ -4,8 +4,8 @@
   <path d="M 13,10 L 8,10 L 4,25 L 8,40 L 13,40 L 9,25 Z" fill="#00FF00"/>
 
   <!-- Unyielding Right Parenthesis -->
-  <path d="M 37,10 L 42,10 L 46,25 L 42,40 L 37,40 L 41,25 Z" fill="#FFFF00"/>
+  <path d="M 37,10 L 42,10 L 46,25 L 42,40 L 37,40 L 41,25 Z" fill="#FF0000"/>
 
   <!-- The Monolithic Lambda -->
-  <path d="M 25,10 L 35,40 L 30,40 L 25,25 L 20,40 L 15,40 Z" fill="#FF0000"/>
+  <path d="M 25,10 L 35,40 L 30,40 L 25,25 L 20,40 L 15,40 Z" fill="#FFFF00"/>
 </svg>
