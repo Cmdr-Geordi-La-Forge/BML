@@ -33,7 +33,7 @@
               while raw-line do
               ;; Aggressively strip ALL whitespace from the edges
               (let ((line (string-trim '(#\Space #\Tab #\Return) raw-line)))
-                (when (and (> (length line) 0) 
+                (when (and (> (length line) 0)
                            (not (char= (char line 0) #\;)))
                   (let ((colon-pos (position #\: line)))
                     (if colon-pos
@@ -200,7 +200,7 @@
                            ((and arg2-int-p (emit-template "imm" arg2)))
 
                            ;; Optimization 2: Local variable / Argument
-                           ((and arg2-local-p 
+                           ((and arg2-local-p
                                  (if (> arg2-loc 0) (emit-template "arg" arg2-loc)
                                                     (emit-template "local" (- arg2-loc))))
                             (track-symbol arg2))
@@ -316,7 +316,7 @@
     (reverse bytes)))
 
 (defun emit-contiguous-data (out label str &key parse-escapes)
-  (let* ((bytes (if parse-escapes (parse-escapes str) 
+  (let* ((bytes (if parse-escapes (parse-escapes str)
                     (loop for i from 0 below (length str) collect (char-code (char str i)))))
          (len (length bytes)))
     (format out "align 8~%")
@@ -354,17 +354,17 @@
            (args (cdr ast)))
        (case func
          (quote (car args))
-         
+
          ;; Translate 0 to nil for safe traversal
          (car (let ((lst (mini-eval (car args) env))) (if (null lst) 0 (car lst))))
          (cdr (let ((lst (mini-eval (car args) env))) (if (null lst) 0 (cdr lst))))
-         
+
          (cons
           (let ((a (mini-eval (car args) env))
                 (d (mini-eval (second args) env)))
             ;; MAGIC TRICK: If the cdr is 0, make it nil so it forms a proper CL list!
             (cons a (if (eql d 0) nil d))))
-            
+
          (eql (if (eql (mini-eval (car args) env) (mini-eval (second args) env)) 1 0))
          (if (if (not (eql 0 (mini-eval (car args) env)))
                  (mini-eval (second args) env)
@@ -387,10 +387,10 @@
   (loop for item in lst
         for expanded = (expand-macro item)
         when expanded
-        collect expanded))
+          collect expanded))
 
 (defun expand-macro (expr)
-  "Expands syntactic sugar and dynamic defmacros down into our native special forms."
+  "Expands syntactic sugar and intercepts macro definitions."
   (if (not (consp expr))
       expr
       (let* ((head (car expr))
@@ -401,17 +401,9 @@
                    (body (third mdef))
                    (env (pairlis params (cdr expr))))
               (expand-macro (mini-eval body env)))
-            
+
             ;; 2. Standard Syntactic Sugar & Special Forms
             (case head
-              (defmacro
-               (let* ((sig (second expr))
-                      (name (first sig))
-                      (params (rest sig))
-                      (body (third expr)))
-                 (push (list name params body) *macenv*)
-                 nil)) ;; Return nil to completely drop the defmacro from Code Gen
-
               (le `(if (gt ,(expand-macro (second expr)) ,(expand-macro (third expr))) 0 1))
               (ge `(if (lt ,(expand-macro (second expr)) ,(expand-macro (third expr))) 0 1))
               (if `(cond (,(expand-macro (second expr)) ,(expand-macro (third expr)))
@@ -424,15 +416,25 @@
               (lambda
                `(,(second expr) (1 ,@(expand-macro-list (cddr expr)))))
               (cond `(cond ,@(mapcar (lambda (c) (expand-macro-list c)) (cdr expr))))
+
               (let
                (let ((bindings (second expr))
-                     (body (cddr expr)))
-                 `(let ,(loop for b in bindings
-                              for exp-val = (expand-macro (second b))
-                              when exp-val collect (list (first b) exp-val))
+                     (body (cddr expr)) ;; <-- FIX: Restored to cddr!
+                     (runtime-bnds nil))
+                 ;; Scan bindings: If it's a macro, save to macenv. Otherwise, keep it for runtime.
+                 (dolist (b bindings)
+                   (let ((sym (first b))
+                         (val (second b)))
+                     (if (and (consp val) (eq (first val) 'macro))
+                         (push (list sym (second val) (third val)) *macenv*)
+                         (let ((exp-val (expand-macro val)))
+                           (when exp-val
+                             (push (list sym exp-val) runtime-bnds))))))
+                 `(let ,(reverse runtime-bnds)
                     ,@(expand-macro-list body))))
+
               (quote expr) ;; Do NOT expand inside quotes!
-              
+
               ;; 3. Standard calls
               (otherwise (expand-macro-list expr)))))))
 
@@ -520,6 +522,20 @@
                  (#\a (format out "  mov rax, [rax]~%"))
                  (#\d (format out "  mov rax, [rax+8]~%")))))))
 
+(defun pack-symbol (sym)
+  "Packs up to 8 characters of a symbol's name into a 64-bit integer,
+   matching the self-hosted compiler's symbol representation."
+  (let* ((name (symbol-name sym))
+         ;; Common Lisp reads symbols as uppercase by default,
+         ;; so we downcase it to match the self-hosted Lisp's behavior.
+         (name-lower (string-downcase name))
+         (acc 0))
+    (loop for i from 0 below (min (length name-lower) 8)
+          for char = (char name-lower i)
+          for code = (char-code char)
+          do (setf acc (logior acc (ash code (* i 8)))))
+    acc))
+
 (defun compile-expr (expr comp-env &optional tail-p parent-arity)
   "Translates a single S-expression. Tracks tail position and parent arity for TCE."
   (cond
@@ -561,14 +577,14 @@
               (format out "  ;; cond block~%")
               (loop for clause in clauses
                     for next-label = (string-left-trim "#:" (symbol-name (gensym "COND_NEXT_"))) do
-                    
+
                     (if (eql (first clause) 1)
                         (format out "  mov rax, 1~%")
                         (format out "~a" (compile-expr (first clause) comp-env nil parent-arity)))
-                        
+
                     (format out "  test rax, rax~%")
                     (format out "  jz ~a~%" next-label)
-                    
+
                     (let ((body (cdr clause)))
                       (if (null body)
                           (format out "  ;; implicit true return~%")
@@ -577,7 +593,7 @@
                                 for is-last = (null (cdr rest))
                                 ;; FIX: Pass comp-env and handle implicit sequence correctly
                                 do (format out "~a" (compile-expr stmt comp-env (and tail-p is-last) parent-arity)))))
-                                
+
                     (format out "  jmp ~a~%" end-label)
                     (format out "~a:~%" next-label))
               (format out "  mov rax, 0~%")
@@ -675,7 +691,7 @@
 (defun compile-program (ast filepath)
   (let ((*used-symbols* nil)
         (*used-floats* nil)
-        (*hoisted-functions* nil) 
+        (*hoisted-functions* nil)
         (*global-vars* nil)
         (*global-env* nil)
         (*macenv* nil))
@@ -703,12 +719,12 @@
       (format out "  mov rdi, rax~%")
       (format out "  mov rax, 60~%")
       (format out "  syscall~%~%")
-      
+
       ;; Emit hoisted lambdas AFTER exit
       (format out "  ;; --- COMPILED FUNCTIONS ---~%")
       (loop for func-asm in (reverse *hoisted-functions*) do
             (format out "~a~%" func-asm))
-      
+
       (emit-data-section out))))
 
 (defun build-program (input-filepaths output-filepath)
@@ -721,4 +737,4 @@
     (compile-program ast output-filepath)))
 
 ;; Feed both files to build step 1
-(build-program '("stdlib.lisp" "boot.lisp") "boot.fasm")
+(build-program '("ir_opcodes.lisp" "stdlib.lisp" "boot.lisp") "boot.fasm")

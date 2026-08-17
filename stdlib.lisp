@@ -1,17 +1,10 @@
-(defmacro (with expr)
-  (cons (quote let)
-        (cons (cons (cons (quote oldh) (cons (cons (quote getheap) 0) 0))
-                    (cons (cons (quote res) (cons expr 0)) 0))
-              (cons (cons (quote setheap) (cons (quote oldh) 0))
-                    (cons (quote res) 0)))))
-
 (let (
   (sfcar (lambda (l) (if (eql l 0) 0 (car l))))
   (sfcdr (lambda (l) (if (eql l 0) 0 (cdr l))))
   
   (isspace (lambda (c) (or (eql c 32) (eql c 10) (eql c 13) (eql c 9))))
   (isdigit (lambda (c) (and (ge c 48) (le c 57))))
-  (isdelim (lambda (c) (or (isspace c) (eql c 0) (eql c 40) (eql c 41))))
+  (isdelim (lambda (c) (or (isspace c) (eql c 0) (eql c 40) (eql c 41) (eql c 39))))
   
   (putstr  (lambda (s) (syscall 1 1 (car s) (cdr s))))
   (putline (lambda (s) (putstr s) (putchar 10)))
@@ -124,7 +117,14 @@
     (cond
       (act (putline "PASS"))
       (1 (putline "FAIL") 
-         (exit 1))))))
+         (exit 1)))))
+
+  (with (macro (expr)
+    (cons (quote let)
+          (cons (cons (cons (quote oldh) (cons (cons (quote getheap) 0) 0))
+                      (cons (cons (quote res) (cons expr 0)) 0))
+                (cons (cons (quote setheap) (cons (quote oldh) 0))
+                      (cons (quote res) 0)))))))
   
   ;; End with '1' so the let-block successfully evaluates and populates globals
   1)
