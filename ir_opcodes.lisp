@@ -48,5 +48,17 @@
       (OP_PTCHR (macro () '46))
       (OP_PTINT (macro () '47))
       (OP_PTHEX (macro () '48))
-      (OP_PTCHK (macro () '49)))
+      (OP_PTCHK (macro () '49))
+
+      ;; --- Control Flow & ABI Stack ---
+      (OP_ADDSP (macro () '50))
+      (OP_TCALL (macro () '51))
+      (OP_POPAR (macro () '52))
+      (OP_PSHAR (macro () '53))
+      (OP_POPRA (macro () '54))
+      (OP_ENTER (macro () '55))
+      (OP_LDFNC (macro () '56))
+      (OP_LDSTR (macro () '57))
+      (OP_STGLB (macro () '58))
+      (OP_DICT  (macro () '59)))
   1)

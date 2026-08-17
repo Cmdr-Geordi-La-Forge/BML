@@ -8,8 +8,8 @@
     eql lt gt le ge
     getchar itof
     and or
-    ash logand logior
-    getheap setheap pokebyte not)
+    ash logand logior not
+    getheap setheap pokebyte dict)
   "Standard assembly mnemonics mapping 1-to-1 with hardware instructions.")
 
 (defvar *used-symbols* nil)
@@ -17,41 +17,10 @@
 (defvar *strings* nil "Alist mapping string literals to FASM labels.")
 (defvar *used-floats* nil "Alist mapping float values to FASM labels.")
 (defvar *label-counter* 0 "Counter for generating safe labels.")
-(defvar *primitives-asm* nil "Alist of dynamic assembly templates.")
 (defvar *global-vars* nil "List of labels to allocate in .bss")
 (defvar *global-env* nil "Alist mapping global variables to labels.")
 (defvar *hoisted-functions* nil "List of raw assembly strings for compiled lambdas.")
 (defvar *macenv* nil "Alist mapping user-defined macros to their AST definitions.")
-
-(defun load-primitives-asm (filepath)
-  (setf *primitives-asm* nil)
-  (with-open-file (in filepath :direction :input :if-does-not-exist nil)
-    (when in
-      (let ((current-op nil)
-            (current-asm nil))
-        (loop for raw-line = (read-line in nil nil)
-              while raw-line do
-              ;; Aggressively strip ALL whitespace from the edges
-              (let ((line (string-trim '(#\Space #\Tab #\Return) raw-line)))
-                (when (and (> (length line) 0)
-                           (not (char= (char line 0) #\;)))
-                  (let ((colon-pos (position #\: line)))
-                    (if colon-pos
-                        ;; 1. We found a colon: It's a new label!
-                        (let* ((op-str (subseq line 0 colon-pos))
-                               (rest-str (subseq line (1+ colon-pos))))
-                          (when current-op
-                            (push (cons current-op (reverse current-asm)) *primitives-asm*))
-                          (setf current-op (intern (string-upcase (string-trim '(#\Space #\Tab) op-str))))
-                          (setf current-asm nil)
-                          (let ((trimmed-rest (string-trim '(#\Space #\Tab) rest-str)))
-                            (when (> (length trimmed-rest) 0)
-                              (push (format nil "  ~a~%" trimmed-rest) current-asm))))
-                        ;; 2. No colon: It must be an instruction!
-                        (when current-op
-                          (push (format nil "  ~a~%" line) current-asm)))))))
-        (when current-op
-          (push (cons current-op (reverse current-asm)) *primitives-asm*))))))
 
 (defun track-float (val)
   "Registers a float and returns its safe FASM label."
@@ -148,95 +117,43 @@
       (format nil "  lea rax, [~a]~%" start-label))))
 
 (defun compile-inline-primitive (expr comp-env parent-arity)
-  (let ((op (car expr))
-        (args (cdr expr)))
+  (let* ((op (car expr))
+         (args (cdr expr)))
     (with-output-to-string (out)
-      (flet ((emit-template (&optional suffix arg)
-               (let* ((key-str (if suffix (format nil "~a_~a" (string-downcase (symbol-name op)) suffix) (string-downcase (symbol-name op))))
-                      (key-sym (intern (string-upcase key-str)))
-                      (template (assoc key-sym *primitives-asm*)))
-                 (when template
-                   (if suffix (format out "  ;; inline optimized ~a~%" key-str)
-                              (format out "  ;; inline ~a~%" op))
-                   (dolist (ins (cdr template))
-                     (let ((pos (search "%1" ins)))
-                       (if pos
-                           (format out "~a~a~a" (subseq ins 0 pos) arg (subseq ins (+ pos 2)))
-                           (format out "~a" ins))))
-                   t)))) ; Returns T on success, NIL on failure
-
+      (flet ((emit-ir (name)
+               (format out "  ir_~a~%" (string-downcase (symbol-name name)))
+               t))
         (cond
           ;; nullary
-          ((member op '(getchar getheap))
-           (or (emit-template) (error "Missing template for ~a" op)))
+          ((member op '(getchar getheap dict))
+           (emit-ir op))
 
           ;; unary
           ((member op '(putint puthex putchar putchunk peek itof alloc setheap not))
            (format out "~a" (compile-expr (first args) comp-env nil parent-arity))
-           (or (emit-template) (error "Missing template for ~a" op)))
+           (emit-ir op))
 
-          ;; binary
-          ;; 1. Variadic Math & Logic
+          ;; binary variadic
           ((member op '(add sub mul div fadd fsub fmul fdiv logior or logand and))
            (if (null args)
                (if (member op '(mul fmul)) (format out "  mov rax, 1~%") (format out "  mov rax, 0~%"))
                (progn
                  (format out "~a" (compile-expr (first args) comp-env nil parent-arity))
-                 (loop for arg2 in (cdr args)
-                       for arg2-int-p = (integerp arg2)
-                       for arg2-sym-p = (symbolp arg2)
-                       for arg2-binding = (when arg2-sym-p (assoc arg2 comp-env))
-                       for arg2-loc = (when arg2-binding (cdr arg2-binding))
-                       for arg2-local-p = (numberp arg2-loc)
-                       do
-                       (flet ((fallback ()
-                                (format out "  push rax~%")
-                                (format out "~a" (compile-expr arg2 comp-env nil parent-arity))
-                                (format out "  mov rcx, rax~%")
-                                (format out "  pop rax~%")
-                                (or (emit-template) (error "Missing template for ~a" op))))
-                         (cond
-                           ;; Optimization 1: Immediate integer
-                           ((and arg2-int-p (emit-template "imm" arg2)))
+                 (loop for arg2 in (cdr args) do
+                       (format out "  push rax~%")
+                       (format out "~a" (compile-expr arg2 comp-env nil parent-arity))
+                       (format out "  ir_set_arg2~%") ;; Use our new stack-swap macro!
+                       (if (member op '(logior or logand and))
+                           (emit-ir (if (member op '(logior or)) 'or 'and))
+                           (emit-ir op))))))
 
-                           ;; Optimization 2: Local variable / Argument
-                           ((and arg2-local-p
-                                 (if (> arg2-loc 0) (emit-template "arg" arg2-loc)
-                                                    (emit-template "local" (- arg2-loc))))
-                            (track-symbol arg2))
-
-                           ;; Fallback
-                           (t (fallback))))))))
-
-          ;; 2. Strict Binary
+          ;; binary strict
           ((member op '(cons poke eql lt gt le ge ash peekidx pokebyte))
-           (let* ((arg1 (first args))
-                  (arg2 (second args))
-                  (arg2-int-p (integerp arg2)))
-             (format out "~a" (compile-expr arg1 comp-env nil parent-arity))
-             (flet ((fallback ()
-                      (format out "  push rax~%")
-                      (format out "~a" (compile-expr arg2 comp-env nil parent-arity))
-                      (format out "  mov rcx, rax~%")
-                      (format out "  pop rax~%")
-                      (if (eq op 'ash)
-                          (let ((lbl-left (string-left-trim "#:" (symbol-name (gensym "ASH_LEFT_"))))
-                                (lbl-done (string-left-trim "#:" (symbol-name (gensym "ASH_DONE_")))))
-                            (format out "  test rcx, rcx~%")
-                            (format out "  jns ~a~%" lbl-left)
-                            (format out "  neg rcx~%")
-                            (format out "  sar rax, cl~%")
-                            (format out "  jmp ~a~%" lbl-done)
-                            (format out "~a:~%" lbl-left)
-                            (format out "  shl rax, cl~%")
-                            (format out "~a:~%" lbl-done))
-                          (or (emit-template) (error "Missing template for ~a" op)))))
-               (cond
-                 ;; Unique check for 'ash' dynamic branches
-                 ((and arg2-int-p (eq op 'ash))
-                  (if (>= arg2 0) (emit-template "left_imm" arg2)
-                                  (emit-template "right_imm" (- arg2))))
-                 (t (fallback))))))
+           (format out "~a" (compile-expr (first args) comp-env nil parent-arity))
+           (format out "  push rax~%")
+           (format out "~a" (compile-expr (second args) comp-env nil parent-arity))
+           (format out "  ir_set_arg2~%")
+           (emit-ir op))
 
           ;; tertiary
           ((member op '(pokeidx))
@@ -246,10 +163,24 @@
            (format out "  push rax~%")
            (format out "~a" (compile-expr (third args) comp-env nil parent-arity))
            (format out "  pop rcx~%")
-           (format out "  pop r8~%")
-           (or (emit-template) (error "Missing template for ~a" op)))
+           (format out "  ir_pop_r8~%")
+           (emit-ir op))
 
           (t (error "Unsupported primitive: ~a" op)))))))
+
+(defun compile-cadr (expr comp-env parent-arity)
+  "Dynamically chains macro calls for any valid c*r sequence."
+  (let* ((op (car expr))
+         (arg (second expr))
+         (s (string-downcase (symbol-name op))))
+    (with-output-to-string (out)
+      (format out "~a" (compile-expr arg comp-env nil parent-arity))
+      (format out "  ;; inline ~a~%" op)
+      (loop for i from (- (length s) 2) downto 1
+            for c = (char s i)
+            do (case c
+                 (#\a (format out "  ir_car~%"))
+                 (#\d (format out "  ir_cdr~%")))))))
 
 (defun compile-string-literal (expr)
   "Evaluates to the pointer of a statically allocated string list."
@@ -419,7 +350,7 @@
 
               (let
                (let ((bindings (second expr))
-                     (body (cddr expr)) ;; <-- FIX: Restored to cddr!
+                     (body (cddr expr))
                      (runtime-bnds nil))
                  ;; Scan bindings: If it's a macro, save to macenv. Otherwise, keep it for runtime.
                  (dolist (b bindings)
@@ -460,6 +391,10 @@
   (loop for label in *global-vars* do
         (format out "align 8~%")
         (format out "~a: dq 0~%" label))
+
+  (format out "~%  ;; --- DICTIONARY ---~%")
+  (format out "align 8~%")
+  (format out "global_dict: file 'dictionary.bin'~%")
 
   (format out "~%  ;; Uninitialized heap memory requested from OS~%")
   (format out "heap_start: rb 1024 * 1024 * 8~%~%"))
@@ -506,21 +441,6 @@
          (loop for i from 1 to (- len 2)
                always (let ((c (char s i)))
                         (or (char= c #\a) (char= c #\d)))))))
-
-(defun compile-cadr (expr comp-env parent-arity)
-  "Dynamically chains mov dereferences for any valid c*r sequence."
-  (let* ((op (car expr))
-         (arg (second expr))
-         (s (string-downcase (symbol-name op))))
-    (with-output-to-string (out)
-      (format out "~a" (compile-expr arg comp-env nil parent-arity))
-      (format out "  ;; inline ~a~%" op)
-      ;; We iterate backwards to evaluate right-to-left!
-      (loop for i from (- (length s) 2) downto 1
-            for c = (char s i)
-            do (case c
-                 (#\a (format out "  mov rax, [rax]~%"))
-                 (#\d (format out "  mov rax, [rax+8]~%")))))))
 
 (defun pack-symbol (sym)
   "Packs up to 8 characters of a symbol's name into a 64-bit integer,
@@ -591,7 +511,6 @@
                           (loop for rest on body
                                 for stmt = (car rest)
                                 for is-last = (null (cdr rest))
-                                ;; FIX: Pass comp-env and handle implicit sequence correctly
                                 do (format out "~a" (compile-expr stmt comp-env (and tail-p is-last) parent-arity)))))
 
                     (format out "  jmp ~a~%" end-label)
@@ -608,7 +527,6 @@
               (format out "  ;; let block~%")
 
               (let* ((current-env comp-env)
-                     ;; FIX: Filter out global string labels, keep only numeric stack offsets!
                      (numeric-offsets (remove-if-not #'numberp (mapcar #'cdr comp-env)))
                      (current-offset (if numeric-offsets
                                          (let ((min-off (apply #'min numeric-offsets)))
@@ -696,12 +614,10 @@
         (*global-env* nil)
         (*macenv* nil))
 
-    (load-primitives-asm "primitives.asm")
-
     (with-open-file (out filepath :direction :output :if-exists :supersede)
       (format out "format ELF64 executable 3~%")
       (format out "segment readable executable~%")
-      (format out "include 'runtime.asm'~%~%")
+      (format out "include 'ir_macros.asm'~%~%")
       (format out "entry _start~%")
       (format out "_start:~%")
       (format out "  push rbp~%")

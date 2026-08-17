@@ -6,7 +6,6 @@
       (globtab    (cons 0 0))
       (strtab     (cons 0 0))
       (lams       (cons 0 0))
-      ;; (globprim   (cons 0 0))
 
       ;; --- 1. I/O & Compiler Loop ---
       (nxtchar (lambda ()
@@ -183,6 +182,7 @@
                  ((eql op (OP_PUSH))  (putline "  ir_push"))
                  ((eql op (OP_SET2))  (putline "  ir_set_arg2"))
                  ((eql op (OP_POPR8)) (putline "  ir_pop_r8"))
+                 ((eql op (OP_POPRA)) (putline "  ir_pop_rax"))
                  ((eql op (OP_ADD))   (putline "  ir_add"))
                  ((eql op (OP_SUB))   (putline "  ir_sub"))
                  ((eql op (OP_MUL))   (putline "  ir_mul"))
@@ -204,6 +204,7 @@
                  ((eql op (OP_PEEKI)) (putline "  ir_peekidx"))
                  ((eql op (OP_POKEI)) (putline "  ir_pokeidx"))
                  ((eql op (OP_NOT))   (putline "  ir_not"))
+                 ((eql op (OP_DICT))  (putline "  ir_dict"))
                  ((eql op (OP_GETHP)) (putline "  ir_getheap"))
                  ((eql op (OP_STHEP)) (putline "  ir_setheap"))
                  ((eql op (OP_ALLOC)) (putline "  ir_alloc"))
@@ -212,6 +213,22 @@
                  ((eql op (OP_PTINT)) (putline "  ir_putint"))
                  ((eql op (OP_PTHEX)) (putline "  ir_puthex"))
                  ((eql op (OP_PTCHK)) (putline "  ir_putchunk"))
+
+                 ((eql op (OP_LABEL)) (putstr  "  ir_label ") (putint arg) (putchar 10))
+                 ((eql op (OP_JZ))    (putstr  "  ir_jz ") (putint arg) (putchar 10))
+                 ((eql op (OP_JMP))   (putstr  "  ir_jmp ") (putint arg) (putchar 10))
+                 ((eql op (OP_CALL))  (putline "  ir_call"))
+                 ((eql op (OP_RET))   (putline "  ir_ret"))
+                 
+                 ((eql op (OP_ADDSP)) (putstr  "  ir_add_rsp ") (putint arg) (putchar 10))
+                 ((eql op (OP_TCALL)) (putline "  ir_tcall"))
+                 ((eql op (OP_POPAR)) (putstr  "  ir_pop_arg ") (putint arg) (putchar 10))
+                 ((eql op (OP_PSHAR)) (putstr  "  ir_push_arg ") (putint arg) (putchar 10))
+                 ((eql op (OP_ENTER)) (putline "  ir_enter"))
+                 ((eql op (OP_LDFNC)) (putstr  "  ir_load_func ") (putint arg) (putchar 10))
+                 ((eql op (OP_LDSTR)) (putstr  "  ir_load_str ") (putint arg) (putchar 10))
+                 ((eql op (OP_STGLB)) (putstr  "  ir_store_glob global_") (putsym arg) (putchar 10))
+                 ((eql op (OP_SYS))   (putstr  "  ir_syscall ") (putint arg) (putchar 10))
 
                  (1 (putstr "  ;; UNKNOWN IR OPCODE: ") (putint op) (putchar 10)))
                (emitir (cdr ir)))))))
@@ -311,18 +328,6 @@
       (cmpnum (lambda (val)
         (cons (cons (OP_LDIMM) val) 0)))
 
-      (emitsym (lambda (symint)
-        (let ((existing (lksymi symint (peek symtab))))
-          (cond (existing 0)
-                (1 (poke symtab (cons (cons symint 1) (peek symtab))))))
-        (putstr "  lea rdi, [sym_") (putsym symint) (putline "]")))
-
-      (emitglob (lambda (symint)
-        (let ((existing (lksymi symint (peek globtab))))
-          (cond (existing 0)
-                (1 (poke globtab (cons (cons symint 1) (peek globtab))))))
-        (putstr "  lea rdi, [global_") (putsym symint) (putline "]")))
-
       (emitclp (lambda (ptr len state)
         (cond
           ((gt len 0)
@@ -392,58 +397,126 @@
         (cond ((eql env 0) 0)
               (1 (let ((val (cdr (car env)))) (cond ((lt val 0) (add 1 (cntlocs (cdr env)))) (1 (cntlocs (cdr env)))))))))
 
+      ;; --- Control Flow ---
+      (cmpif (lambda (args compenv istail pararity) 
+        (let ((cnd (car args)) (thn (car (cdr args))) (els (car (cdr (cdr args)))) 
+              (elsid (getid)) (endid (getid))) 
+          (cmpexpr cnd compenv 0 pararity) 
+          (emitir (cons (cons (OP_JZ) elsid) 0))
+          (cmpexpr thn compenv istail pararity) 
+          (emitir (cons (cons (OP_JMP) endid) 0))
+          (emitir (cons (cons (OP_LABEL) elsid) 0))
+          (cmpexpr els compenv istail pararity) 
+          (emitir (cons (cons (OP_LABEL) endid) 0)))))
+
+      (cmpcndc (lambda (clauses endid compenv istail pararity)
+        (cond
+          ((eql clauses 0) 
+           (emitir (cons (cons (OP_LDIMM) 0) 0))
+           (emitir (cons (cons (OP_LABEL) endid) 0)))
+          (1 (let ((clause (car clauses)) (nextid (getid)) (clauslst (cdr clause))
+                   (cnd (car clauslst)) (body (cdr clauslst)))
+               (cmpexpr cnd compenv 0 pararity) 
+               (emitir (cons (cons (OP_JZ) nextid) 0))
+               (cmpseq body compenv istail pararity)
+               (emitir (cons (cons (OP_JMP) endid) 0))
+               (emitir (cons (cons (OP_LABEL) nextid) 0))
+               (cmpcndc (cdr clauses) endid compenv istail pararity))))))
+      
+      ;; --- Bindings ---
       (cmpbnd (lambda (binding offset crrenv pararity)
         (let ((bnditems (cdr binding)) (varnode (car bnditems)) (valnode (car (cdr bnditems))))
           (cmpexpr valnode crrenv 0 pararity)
-          (putline "  push rax")
+          (emitir (cons (cons (OP_PUSH) 0) 0))
           (cons (cons (cdr varnode) offset) crrenv))))
-
-      (cmpbnds (lambda (bindings offset crrenv pararity)
-        (cond (bindings (let ((newenv (cmpbnd (car bindings) offset crrenv pararity))) (cmpbnds (cdr bindings) (sub offset 8) newenv pararity))) (1 crrenv))))
 
       (cmplet (lambda (args compenv istail pararity)
         (let ((bndslst (cdr (car args))) (bodystmt (cdr args)) (numbnds (cntbnds bndslst))
               (offset (mul -8 (add 1 (cntlocs compenv))))
               (newenv (cmpbnds bndslst offset compenv pararity)))
-          (putline "  ;; let block")
           (cmpseq bodystmt newenv istail pararity)
-          (putstr "  add rsp, ") (putint (mul 8 numbnds)) (putline " ; Pop let bindings"))))
+          (emitir (cons (cons (OP_ADDSP) (mul 8 numbnds)) 0)))))
 
       (cmpgbnds (lambda (bindings compenv)
         (cond
           (bindings
-           (let ((bnditems (cdr (car bindings))) (varnode (car bnditems)) (valnode (car (cdr bnditems))))
-             (cmpexpr valnode compenv 0 0) (putline "  push rax")
-             (emitglob (cdr varnode)) (putline "  pop rax") (putline "  mov [rdi], rax")
+           (let ((bnditems (cdr (car bindings))) 
+                 (varnode (car bnditems)) 
+                 (valnode (car (cdr bnditems)))
+                 (symint (cdr varnode)))
+             
+             (let ((existing (lksymi symint (peek globtab))))
+               (cond (existing 0)
+                     (1 (poke globtab (cons (cons symint 1) (peek globtab))))))
+             
+             (cmpexpr valnode compenv 0 0)
+             (emitir (cons (cons (OP_PUSH) 0) 0))
+             (emitir (cons (cons (OP_STGLB) symint) 0))
              (cmpgbnds (cdr bindings) compenv)))
           (1 0))))
+      
+      ;; --- Functions & Apply ---
+      (cmplam (lambda (args compenv) 
+        (let ((id (getid))) 
+          (poke lams (cons (cons id args) (peek lams)))
+          (emitir (cons (cons (OP_LDFNC) id) 0)))))
+
+      (alllams (lambda ()
+        (let ((lambdas (peek lams)))
+          (cond
+            (lambdas (poke lams (cdr lambdas))
+             (let ((entry (car lambdas)) (id (car entry)) (args (cdr entry))
+                   (params (cdr (car args))) (bodystmt (cdr args)) 
+                   (numparam (cntbnds params)) 
+                   (lamenv (bldpenv params -8 0)))
+               (emitir (cons (cons (OP_LABEL) id) 0))
+               (emitir (cons (cons (OP_ENTER) 0) 0))
+               (pushargs numparam 0)
+               (cmpseq bodystmt lamenv 1 numparam) 
+               (emitir (cons (cons (OP_RET) 0) 0))
+               (alllams)))
+            (1 0)))))
+
+      (cmpapp (lambda (funcnode args compenv istail pararity) 
+        (let ((numargs (cntbnds args)))
+          (cmpargs args compenv pararity) 
+          (cmpexpr funcnode compenv 0 pararity)
+          (popargs numargs 0) 
+          (cond
+            (istail (emitir (cons (cons (OP_TCALL) 0) 0)))
+            (1 (emitir (cons (cons (OP_CALL) 0) 0)))))))
+
+      (cmpargs (lambda (args compenv pararity) 
+        (cond 
+          (args (cmpargs (cdr args) compenv pararity) 
+                (cmpexpr (car args) compenv 0 pararity) 
+                (emitir (cons (cons (OP_PUSH) 0) 0)))
+          (1 0))))
+
+      (popargs (lambda (n i)
+        (cond ((eql i n) 0)
+              (1 (emitir (cons (cons (OP_POPAR) i) 0))
+                 (popargs n (add i 1))))))
+
+      (pushargs (lambda (n i)
+        (cond ((eql i n) 0)
+              (1 (emitir (cons (cons (OP_PSHAR) i) 0))
+                 (pushargs n (add i 1))))))
+
+      (cmpsys (lambda (args compenv pararity)
+        (let ((numargs (cntbnds args)))
+          (cmpargs args compenv pararity)
+          (emitir (cons (cons (OP_POPRA) 0) 0))
+          (popargs (sub numargs 1) 0)
+          (emitir (cons (cons (OP_SYS) numargs) 0)))))
+
+      (cmpbnds (lambda (bindings offset crrenv pararity)
+        (cond (bindings (let ((newenv (cmpbnd (car bindings) offset crrenv pararity))) (cmpbnds (cdr bindings) (sub offset 8) newenv pararity))) (1 crrenv))))
 
       (cmpglet (lambda (args compenv)
         (putline "  ;; global let block")
         (cmpgbnds (cdr (car args)) compenv)
         (cmpseq (cdr args) compenv 0 0)))
-
-      ;; --- 4. Special Forms & Native COND ---
-      (cmpif (lambda (args compenv istail pararity)
-        (let ((cnd (car args)) (thn (car (cdr args))) (els (car (cdr (cdr args)))) (id (getid)))
-          (putline "  ;; if block")
-          (cmpexpr cnd compenv 0 pararity) (putline "  test rax, rax")
-          (putstr "  jz IF_ELS_") (putint id) (putchar 10)
-          (cmpexpr thn compenv istail pararity) (putstr "  jmp IF_END_") (putint id) (putchar 10)
-          (putstr "IF_ELS_") (putint id) (putline ":")
-          (cmpexpr els compenv istail pararity) (putstr "IF_END_") (putint id) (putline ":"))))
-
-      (cmpcndc (lambda (clauses endid compenv istail pararity)
-        (cond
-          ((eql clauses 0) (putline "  mov rax, 0") (putstr "COND_END_") (putint endid) (putline ":"))
-          (1 (let ((clause (car clauses)) (nextid (getid)) (clauslst (cdr clause))
-                   (cnd (car clauslst)) (body (cdr clauslst)))
-               (cmpexpr cnd compenv 0 pararity) (putline "  test rax, rax")
-               (putstr "  jz COND_NEXT_") (putint nextid) (putchar 10)
-               (cmpseq body compenv istail pararity)
-               (putstr "  jmp COND_END_") (putint endid) (putchar 10)
-               (putstr "COND_NEXT_") (putint nextid) (putline ":")
-               (cmpcndc (cdr clauses) endid compenv istail pararity))))))
 
       (cmpcond (lambda (args compenv istail pararity)
         (let ((endid (getid)))
@@ -464,90 +537,8 @@
                             (bldpenv (cdr params) (sub offset 8) baseenv)))
               (1 baseenv))))
 
-      (alllams (lambda ()
-        (let ((lambdas (peek lams)))
-          (cond
-            (lambdas (poke lams (cdr lambdas))
-             (let ((entry (car lambdas)) (id (car entry)) (args (cdr entry))
-                   (params (cdr (car args))) (bodystmt (cdr args))
-                   (numparam (cntbnds params))
-                   (lamenv (bldpenv params -8 0))) ; <-- Local frame mapping
-               (putstr "L_START_") (putint id) (putline ":")
-               (putline "  push rbp")
-               (putline "  mov rbp, rsp")
-               (pushargs numparam 0) ; <-- Push C ABI registers to locals
-               (cmpseq bodystmt lamenv 1 numparam)
-               (putline "  mov rsp, rbp")
-               (putline "  pop rbp")
-               (putline "  ret") ; <-- Standard return!
-               (alllams)))
-            (1 0)))))
-
-      (cmpapp (lambda (funcnode args compenv istail pararity)
-        (let ((numargs (cntbnds args)))
-          (cmpargs args compenv pararity)
-          (cmpexpr funcnode compenv 0 pararity)
-
-          (putline "  ;; load C ABI registers")
-          (popargs numargs 0)
-
-          (cond
-            (istail
-             (putline "  ;; tail-call")
-             (putline "  mov rsp, rbp")
-             (putline "  pop rbp")
-             (putline "  jmp rax")) ; <-- Hardware TCE
-            (1 (putline "  call rax"))))))
-
-      (cmplam (lambda (args compenv)
-        (let ((id (getid)))
-          (poke lams (cons (cons id args) (peek lams)))
-          (putstr "  lea rax, [L_START_") (putint id) (putline "]"))))
-
-      (cmpargs (lambda (args compenv pararity)
-        (cond
-          (args (cmpargs (cdr args) compenv pararity)
-                (cmpexpr (car args) compenv 0 pararity)
-                (putline "  push rax"))
-          (1 0))))
-
-      (popargs (lambda (n i)
-        (cond ((eql i n) 0)
-              (1 (putstr "  pop ")
-                 (cond ((eql i 0) (putline "rdi"))
-                       ((eql i 1) (putline "rsi"))
-                       ((eql i 2) (putline "rdx"))
-                       ((eql i 3) (putline "rcx"))
-                       ((eql i 4) (putline "r8"))
-                       ((eql i 5) (putline "r9")))
-                 (popargs n (add i 1))))))
-
-      (pushargs (lambda (n i)
-        (cond ((eql i n) 0)
-              (1 (putstr "  push ")
-                 (cond ((eql i 0) (putline "rdi"))
-                       ((eql i 1) (putline "rsi"))
-                       ((eql i 2) (putline "rdx"))
-                       ((eql i 3) (putline "rcx"))
-                       ((eql i 4) (putline "r8"))
-                       ((eql i 5) (putline "r9")))
-                 (pushargs n (add i 1))))))
-
-      (cmpsys (lambda (args compenv pararity)
-        (let ((numargs (cntbnds args)))
-          (cmpargs args compenv pararity)
-          (putline "  ;; syscall")
-          (putline "  pop rax")
-          (popargs (sub numargs 1) 0)
-
-          ;; CFFI Bridge: The kernel expects the 4th arg in r10, not rcx.
-          ;; If we have 4+ args (numargs >= 5 including syscall number), move it!
-          (cond ((ge numargs 5) (putline "  mov r10, rcx")) (1 0))
-
-          (putline "  syscall"))))
-
       ;; --- 6. Hardcoded Hardware Primitives ---
-      (isnul (lambda (s) (cond ((symeq s "getchar") 1) ((symeq s "getheap") 1) (1 0))))
+      (isnul (lambda (s) (cond ((symeq s "getchar") 1) ((symeq s "getheap") 1) ((symeq s "dict") 1) (1 0))))
       (isun (lambda (s)
         (cond ((symeq s "putint") 1) ((symeq s "puthex") 1) ((symeq s "putchar") 1) ((symeq s "putchunk") 1)
               ((symeq s "peek") 1) ((symeq s "alloc") 1) ((symeq s "setheap") 1) ((symeq s "car") 1)
@@ -570,6 +561,7 @@
                (cond
                  ((symeq symint "getchar") (OP_GTCHR))
                  ((symeq symint "getheap") (OP_GETHP))
+                 ((symeq symint "dict")    (OP_DICT))
                  (1 0))))
           (emitir (cons (cons opir 0) 0)))))
 
@@ -704,7 +696,7 @@
                       (1 (emitir (cons (cons (OP_LDMEM) offset) 0))))))
 
                  ((eql tag 2) (cmplist val compenv istail pararity))
-                 ((eql tag 3) (let ((id (getid))) (poke strtab (cons (cons id val) (peek strtab))) (putline "  ;; string literal") (putstr "  lea rax, [STR_") (putint id) (putline "]")))
+                 ((eql tag 3) (let ((id (getid))) (poke strtab (cons (cons id val) (peek strtab))) (emitir (cons (cons (OP_LDSTR) id) 0))))
                  (1 0)))))))
 
       (cmpprog (lambda (ast)
@@ -730,7 +722,6 @@
   ;; --- 7. THE MAIN ENTRY POINT ---
   (putline "format ELF64 executable 3")
   (putline "segment readable executable")
-  (putline "include 'runtime.asm'")
   (putline "include 'ir_macros.asm'")
   (putline "entry _start")
   (putline "_start:")
@@ -738,7 +729,6 @@
   (putline "  mov rbp, rsp")
   (putline "  lea r15, [heap_start]")
 
-  ;; (loadprim "primitives.asm")
   (cmploop) ; We now evaluate top-level code blocks continuously!
 
   (putline "  mov rdi, rax")
@@ -752,4 +742,6 @@
   (allsyms (peek symtab))
   (allglobs (peek globtab))
   (allstrs (peek strtab))
+  (putline "align 8")
+  (putline "global_dict: file 'dictionary.bin'")
   (putline "heap_start: rb 1024 * 1024 * 8"))

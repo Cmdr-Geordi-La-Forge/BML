@@ -103,6 +103,8 @@ macro ir_pokebyte { mov [rax], cl }
 macro ir_peekidx { mov rax, [rax + rcx*8] }
 macro ir_pokeidx { mov [r8 + rcx*8], rax }
 
+macro ir_dict { lea rax, [global_dict] }
+
 macro ir_getheap { mov rax, r15 }
 macro ir_setheap { mov r15, rax }
 macro ir_alloc {
@@ -123,3 +125,176 @@ macro ir_putchar  { call print_char }
 macro ir_putint   { call print_int }
 macro ir_puthex   { call print_hex }
 macro ir_putchunk { call print_chunk }
+
+;; --- ABI & Function calls ---
+macro ir_add_rsp val { add rsp, val }
+macro ir_pop_rax { pop rax }
+
+macro ir_enter {
+  push rbp
+  mov rbp, rsp
+}
+macro ir_tcall {
+  mov rsp, rbp
+  pop rbp
+  jmp rax
+}
+macro ir_load_func id { lea rax, [label_#id] }
+macro ir_load_str id  { lea rax, [STR_#id] }
+macro ir_store_glob label {
+  pop rax
+  lea rdi, [label]
+  mov [rdi], rax
+}
+
+;; C ABI Register Mapping
+macro ir_pop_arg idx {
+  if idx = 0
+    pop rdi
+  else if idx = 1
+    pop rsi
+  else if idx = 2
+    pop rdx
+  else if idx = 3
+    pop rcx
+  else if idx = 4
+    pop r8
+  else if idx = 5
+    pop r9
+  end if
+}
+
+macro ir_push_arg idx {
+  if idx = 0
+    push rdi
+  else if idx = 1
+    push rsi
+  else if idx = 2
+    push rdx
+  else if idx = 3
+    push rcx
+  else if idx = 4
+    push r8
+  else if idx = 5
+    push r9
+  end if
+}
+
+macro ir_syscall numargs {
+  if numargs >= 5
+    mov r10, rcx
+  end if
+  syscall
+}
+
+;; --- I/O (Position Independent for JIT) ---
+
+macro ir_getchar {
+  push 0       ;; Push 8 bytes of zeroes to stack
+  mov rax, 0   ;; sys_read
+  mov rdi, 0   ;; stdin
+  mov rsi, rsp ;; buffer points to the zeroes we pushed
+  mov rdx, 1   ;; read 1 byte
+  syscall      ;; (Linux syscalls clobber rcx and r11)
+  pop rax      ;; Pop the buffer (now containing our char) into rax
+}
+
+macro ir_putchar {
+  push rax     ;; Push the char to the stack
+  mov rax, 1   ;; sys_write
+  mov rdi, 1   ;; stdout
+  mov rsi, rsp ;; buffer is the stack
+  mov rdx, 1   ;; write 1 byte
+  syscall
+  pop rax      ;; Restore rax
+}
+
+macro ir_putint {
+  local .loop, .print, .done, .is_zero, .positive, .print_neg_check
+  mov rcx, 10
+  mov r8, rsp
+  mov r9, 0    ;; negative flag
+  test rax, rax
+  jns .positive
+  neg rax
+  mov r9, 1
+.positive:
+  test rax, rax
+  jnz .loop
+  push 48      ;; '0'
+  jmp .print_neg_check
+.loop:
+  test rax, rax
+  jz .print_neg_check
+  xor rdx, rdx
+  div rcx
+  add rdx, 48
+  push rdx
+  jmp .loop
+.print_neg_check:
+  test r9, r9
+  jz .print
+  push 45      ;; '-'
+.print:
+  cmp rsp, r8
+  je .done
+  mov rax, 1
+  mov rdi, 1
+  mov rsi, rsp
+  mov rdx, 1
+  syscall      
+  add rsp, 8
+  jmp .print
+.done:
+}
+
+macro ir_puthex {
+  local .loop, .print, .done, .is_num, .push_char
+  mov rcx, 16
+  mov r8, rsp
+  test rax, rax
+  jnz .loop
+  push 48
+  jmp .print
+.loop:
+  test rax, rax
+  jz .print
+  xor rdx, rdx
+  div rcx
+  cmp rdx, 9
+  jbe .is_num
+  add rdx, 87  ;; 'a' - 10
+  jmp .push_char
+.is_num:
+  add rdx, 48
+.push_char:
+  push rdx
+  jmp .loop
+.print:
+  cmp rsp, r8
+  je .done
+  mov rax, 1
+  mov rdi, 1
+  mov rsi, rsp
+  mov rdx, 1
+  syscall
+  add rsp, 8
+  jmp .print
+.done:
+}
+
+macro ir_putchunk {
+  local .len_loop, .print
+  ;; rax contains pointer to null-terminated string
+  mov rsi, rax
+  xor rdx, rdx
+.len_loop:
+  cmp byte [rsi + rdx], 0
+  je .print
+  inc rdx
+  jmp .len_loop
+.print:
+  mov rax, 1   ;; sys_write
+  mov rdi, 1   ;; stdout
+  syscall
+}
