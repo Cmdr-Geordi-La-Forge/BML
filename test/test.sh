@@ -13,7 +13,7 @@ for f in "$TEST_DIR"/t_*.lisp; do
     echo "--- Compiling $BASENAME ---"
     
     # Prepend the standard library before passing it to the compiler
-    cat stdlib.lisp ir_opcodes.lisp "$f" | ./boot3 > "$TEST_DIR/$NAME_NO_EXT.fasm"
+    cat stdlib.lisp ir_opcodes.lisp "$f" | ./boot > "$TEST_DIR/$NAME_NO_EXT.fasm"
     
     fasm "$TEST_DIR/$NAME_NO_EXT.fasm"
     FASM_CODE=$?

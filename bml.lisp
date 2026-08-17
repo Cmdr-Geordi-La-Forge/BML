@@ -392,9 +392,9 @@
         (format out "align 8~%")
         (format out "~a: dq 0~%" label))
 
-  (format out "~%  ;; --- DICTIONARY ---~%")
-  (format out "align 8~%")
-  (format out "global_dict: file 'dictionary.bin'~%")
+  ;; (format out "~%  ;; --- DICTIONARY ---~%")
+  ;; (format out "align 8~%")
+  ;; (format out "global_dict: file 'dictionary.bin'~%")
 
   (format out "~%  ;; Uninitialized heap memory requested from OS~%")
   (format out "heap_start: rb 1024 * 1024 * 8~%~%"))
@@ -653,4 +653,4 @@
     (compile-program ast output-filepath)))
 
 ;; Feed both files to build step 1
-(build-program '("ir_opcodes.lisp" "stdlib.lisp" "boot.lisp") "boot.fasm")
+(build-program '("stdlib.lisp" "boot.lisp") "boot.fasm")

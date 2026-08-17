@@ -8,6 +8,16 @@
   
   (putstr  (lambda (s) (syscall 1 1 (car s) (cdr s))))
   (putline (lambda (s) (putstr s) (putchar 10)))
+  (eputstr  (lambda (s) (syscall 1 2 (car s) (cdr s))))
+  (eputline (lambda (s) (eputstr s) (syscall 1 2 (car "\n") 1)))
+
+  (eputsymc (lambda (symint count)
+    (cond ((or (eql symint 0) (ge count 8)) 0)
+          (1 (let ((ptr (getheap)))
+               (pokebyte ptr (logand symint 255))
+               (syscall 1 2 ptr 1)
+               (eputsymc (ash symint -8) (add count 1)))))))
+  (eputsym (lambda (symint) (eputsymc symint 0)))
   
   (cpybytes (lambda (src dst len)
     (cond ((gt len 0)
@@ -101,6 +111,23 @@
       (cpybytes (car s) ptr len)
       (pokebyte (add ptr len) 0)
       ptr)))
+
+  
+  (lksym (lambda (str table)
+    (cond ((eql table 0) 0)
+          (1 (let ((entry (sfcar table)))
+               (cond ((streq str (car entry)) (cdr entry))
+                     (1 (lksym str (cdr table)))))))))
+
+  (lksymi (lambda (symint table)
+    (cond ((eql table 0) 0)
+          (1 (let ((entry (sfcar table)))
+               (cond ((eql symint (car entry)) (cdr entry))
+                     (1 (lksymi symint (cdr table)))))))))
+
+  (reverse (lambda (lst acc)
+    (cond ((eql lst 0) acc)
+          (1 (reverse (cdr lst) (cons (car lst) acc))))))
       
   (exit (lambda (code) (syscall 60 code)))
   

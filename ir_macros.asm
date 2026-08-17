@@ -5,9 +5,9 @@
 macro ir_load_imm val { mov rax, val }
 
 ;; Handles both locals (negative offsets) and args (positive offsets)
-macro ir_load_mem offset { mov rax, [rbp + offset] } 
+macro ir_load_mem offset { mov rax, [rbp + offset] }
 
-macro ir_load_glob label { 
+macro ir_load_glob label {
   lea rdi, [label]
   mov rax, [rdi]
 }
@@ -15,7 +15,7 @@ macro ir_load_glob label {
 ;; --- 3. Stack & Control Flow ---
 macro ir_push { push rax }
 macro ir_pop_r8 { pop r8 }
-macro ir_set_arg2 { 
+macro ir_set_arg2 {
   mov rcx, rax
   pop rax
 }
@@ -30,7 +30,7 @@ macro ir_jz id {
 macro ir_jmp id { jmp label_#id }
 
 macro ir_call { call rax }
-macro ir_ret { 
+macro ir_ret {
   mov rsp, rbp
   pop rbp
   ret
@@ -113,6 +113,9 @@ macro ir_alloc {
   add r15, rax
   mov rax, rcx
 }
+
+macro ir_load_mem_dyn { mov rax, [rbp + rax] }
+macro ir_add_rsp_dyn  { add rsp, rax }
 
 ;; --- Logic & I/O ---
 macro ir_not {
@@ -242,7 +245,7 @@ macro ir_putint {
   mov rdi, 1
   mov rsi, rsp
   mov rdx, 1
-  syscall      
+  syscall
   add rsp, 8
   jmp .print
 .done:
@@ -298,3 +301,60 @@ macro ir_putchunk {
   mov rdi, 1   ;; stdout
   syscall
 }
+
+;; --- SELF-DESCRIBING DICTIONARY ---
+macro regop opsym, macname {
+    local start, end
+    align 8
+    dq opsym                    ;; FASM evaluates 'add' to 0x646461!
+    dq (end - start)            ;; Dynamically calculates the size
+    start:
+      macname                   ;; The hardware instructions
+    end:
+}
+
+align 8
+global_dict:
+  regop 'push', ir_push
+  regop 'set2', ir_set_arg2
+  regop 'popr8', ir_pop_r8
+  regop 'add', ir_add
+  regop 'sub', ir_sub
+  regop 'mul', ir_mul
+  regop 'div', ir_div
+  regop 'eql', ir_eql
+  regop 'lt', ir_lt
+  regop 'gt', ir_gt
+  regop 'le', ir_le
+  regop 'ge', ir_ge
+  regop 'and', ir_and
+  regop 'logand', ir_and
+  regop 'or', ir_or
+  regop 'logior', ir_or
+  regop 'ash', ir_ash
+  regop 'not', ir_not
+  regop 'car', ir_car
+  regop 'cdr', ir_cdr
+  regop 'cons', ir_cons
+  regop 'peek', ir_peek
+  regop 'poke', ir_poke
+  regop 'pokebyte', ir_pokebyte
+  regop 'peekidx', ir_peekidx
+  regop 'pokeidx', ir_pokeidx
+  regop 'getheap', ir_getheap
+  regop 'setheap', ir_setheap
+  regop 'alloc', ir_alloc
+  regop 'getchar', ir_getchar
+  regop 'putchar', ir_putchar
+  regop 'putint', ir_putint
+  regop 'puthex', ir_puthex
+  regop 'putchunk', ir_putchunk
+  regop 'popra', ir_pop_rax
+  regop 'enter', ir_enter
+  regop 'call', ir_call
+  regop 'ret', ir_ret
+  regop 'tcall', ir_tcall
+  regop 'ldmd', ir_load_mem_dyn
+  regop 'addsd', ir_add_rsp_dyn
+  align 8
+  dq 0 ;; Null terminator
