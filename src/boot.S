@@ -101,6 +101,7 @@ repl_loop:
 
     // 6. Print Result
     bl print_node
+    bl print_newline
 
     add sp, sp, #256            // Clean up read buffer
     b repl_loop

@@ -60,7 +60,6 @@ compile_done:
     ldp x29, x30, [sp], #32
     ret
 
-
 // --- handler_add ---
 // Input: x0 = Tagged List: (Rd Rn Rm)
 // Action: Emits "add Rd, Rn, Rm" to JIT_HEAD
@@ -114,6 +113,121 @@ handler_add:
     // Macros return NIL during compilation
     mov x0, #(TAG_LIST << 56)
 
+    ldp x21, x22, [sp, #32]
+    ldp x19, x20, [sp, #16]
+    ldp x29, x30, [sp], #48
+    ret
+
+    // --- handler_sub ---
+// Input: x0 = (Rd Rn Rm)
+// Action: Emits "sub Rd, Rn, Rm"
+.global handler_sub
+handler_sub:
+    stp x29, x30, [sp, #-48]!
+    stp x19, x20, [sp, #16]
+    stp x21, x22, [sp, #32]
+    mov x19, x0             
+
+    bl prim_car
+    ldr x1, =env_root
+    bl eval                 
+    and x20, x0, #0xFF      // Rd
+
+    mov x0, x19
+    bl prim_cdr
+    mov x19, x0
+    bl prim_car
+    ldr x1, =env_root
+    bl eval
+    and x21, x0, #0xFF      // Rn
+
+    mov x0, x19
+    bl prim_cdr
+    mov x19, x0
+    bl prim_car
+    ldr x1, =env_root
+    bl eval
+    and x22, x0, #0xFF      // Rm
+
+    // Base mask for 64-bit SUB: 0xCB000000
+    ldr w9, =0xCB000000
+    lsl w22, w22, #16       
+    orr w9, w9, w22
+    lsl w21, w21, #5        
+    orr w9, w9, w21
+    orr w9, w9, w20         
+    
+    str w9, [JIT_HEAD], #4  
+
+    mov x0, #(TAG_LIST << 56)
+    ldp x21, x22, [sp, #32]
+    ldp x19, x20, [sp, #16]
+    ldp x29, x30, [sp], #48
+    ret
+
+// --- handler_if ---
+// Input: x0 = (Rt then_expr else_expr)
+.global handler_if
+handler_if:
+    stp x29, x30, [sp, #-48]!
+    stp x19, x20, [sp, #16]
+    stp x21, x22, [sp, #32]
+    mov x19, x0
+
+    // 1. Parse Rt (The register to test)
+    bl prim_car
+    ldr x1, =env_root
+    bl eval                 // e.g., 'x2' evaluates to 2
+    and x20, x0, #0xFF      // x20 = Rt
+
+    // 2. Emit 'CBZ Rt, else_branch'
+    mov x21, JIT_HEAD       // Save address P1
+    ldr w9, =0xB4000000     // CBZ base mask
+    orr w9, w9, w20         // Inject Rt into bits 0-4 of the instruction!
+    str w9, [JIT_HEAD], #4
+
+    // 3. Compile THEN branch
+    mov x0, x19
+    bl prim_cdr
+    mov x19, x0
+    bl prim_car
+    ldr x1, =env_root
+    bl eval
+
+    // 4. Emit Unconditional 'B end'
+    mov x22, JIT_HEAD       // Save address P2
+    ldr w9, =0x14000000     // B base mask
+    str w9, [JIT_HEAD], #4
+
+    // 5. Backpatch CBZ to point to ELSE
+    sub x9, JIT_HEAD, x21   
+    lsr x9, x9, #2          
+    ldr w10, =0x7FFFF       
+    and w9, w9, w10
+    lsl w9, w9, #5          // Shift offset to bits 5-23
+    ldr w11, [x21]          
+    orr w11, w11, w9        // Inject offset without destroying Rt!
+    str w11, [x21]          
+
+    // 6. Compile ELSE branch
+    mov x0, x19
+    bl prim_cdr
+    mov x19, x0
+    bl prim_car
+    ldr x1, =env_root
+    bl eval
+
+    // 7. Backpatch 'B' to point to END
+    sub x9, JIT_HEAD, x22   
+    lsr x9, x9, #2          
+    ldr w10, =0x3FFFFFF     
+    and w9, w9, w10
+    ldr w11, [x22]          
+    orr w11, w11, w9        
+    str w11, [x22]          
+
+    mov x0, #(TAG_LIST << 56) // Return NIL
+    
     ldp x21, x22, [sp, #32]
     ldp x19, x20, [sp, #16]
     ldp x29, x30, [sp], #48
