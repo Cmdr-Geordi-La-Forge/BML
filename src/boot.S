@@ -4,15 +4,23 @@
 str_prompt: .asciz "\n=> "
 str_bye:    .asciz "\nGoodbye!\n"
 
+    // --- THE PERMANENT WATERMARKS ---
+    .global watermark_dat
+watermark_dat: .quad 16
+    .global watermark_ast
+watermark_ast: .quad 0
+    .global watermark_jit
+watermark_jit: .quad 0x40000
+
     .text
     .global _start
 
     .equ SYS_MMAP, 222
     .equ SYS_EXIT, 93
-    .equ PROT_RWX, 7       
-    .equ MAP_ANON_PRIV, 34 
-    .equ ARENA_SIZE, 0x00100000 
-    .equ HALF_ARENA, 0x00080000 
+    .equ PROT_RWX, 7
+    .equ MAP_ANON_PRIV, 34
+    .equ ARENA_SIZE, 0x00100000
+    .equ HALF_ARENA, 0x00080000
 
 _start:
     // 1. Allocate & Setup Pivot
@@ -64,11 +72,18 @@ tag_macro_done:
 
     // --- THE REPL LOOP ---
 repl_loop:
-    // 1. The Ultimate Garbage Collector!
-    // Instantly reclaim 100% of memory from the last evaluation.
-    mov AST_OFF, #0
-    mov DAT_OFF, #0
-    add JIT_HEAD, x27, #0x40000 // Reset JIT compiler head back to 256KB offset
+    // 1. Reset temporary memory back to the permanent Watermarks!
+    ldr x9, =watermark_ast
+    ldr x10, [x9]
+    mov AST_OFF, x10
+
+    ldr x9, =watermark_dat
+    ldr x10, [x9]
+    mov DAT_OFF, x10
+
+    ldr x9, =watermark_jit
+    ldr x10, [x9]
+    add JIT_HEAD, x27, x10      // JIT_HEAD = NIL_CAR + Watermark offset
 
     // 2. Print Prompt
     ldr x0, =str_prompt
@@ -90,7 +105,7 @@ repl_loop:
     sub x0, x0, #1
     strb wzr, [sp, x0]
 
-    // 4. Parse 
+    // 4. Parse
     mov x0, sp
     bl parse
     mov x19, x0                 // Save tagged AST

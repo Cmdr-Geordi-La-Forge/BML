@@ -13,6 +13,7 @@ sym_lambda: .asciz "lambda"
 sym_add:    .asciz "add"
 sym_sub:    .asciz "sub"
 sym_if:     .asciz "if"
+sym_def:    .asciz "def"
 
 .irp reg, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
     .global sym_x\reg
@@ -35,8 +36,9 @@ env_macros:
     .quad sym_add,    handler_add
     .quad sym_sub,    handler_sub
     .quad sym_if,     handler_if
+    .quad sym_def,    handler_def
     .global env_macros_end
-    
+
 env_macros_end:
 
     .quad sym_nil,  ((TAG_LIST << 56) | 0)
@@ -45,4 +47,9 @@ env_macros_end:
         .quad sym_x\reg, ((TAG_INT << 56) | \reg)
     .endr
 
+    .global env_tail
+env_tail:
     .quad 0, 0
+
+    .global env_tail_ptr
+env_tail_ptr: .quad env_tail

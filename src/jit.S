@@ -12,42 +12,42 @@ handler_lambda:
     stp x19, x20, [sp, #16]
     stp x21, x22, [sp, #32]
 
-    mov x19, x0             
-    mov x20, x1             
-    mov x21, JIT_HEAD       
+    mov x19, x0
+    mov x20, x1
+    mov x21, JIT_HEAD
 
     bl prim_car
-    mov x22, x0             
+    mov x22, x0
 
     // Allocate CTE safely using the Stack
-    add x9, NIL_CAR, DAT_OFF 
+    add x9, NIL_CAR, DAT_OFF
     str x9, [sp, #48]       // [sp, #48] = New Env Ptr
     str x9, [sp, #56]       // [sp, #56] = Write Head
 
-    mov x8, #0              
+    mov x8, #0
 arg_loop:
     EXTRACT_OFFSET x9, x22
     cbz x9, args_done
 
     mov x0, x22
     bl prim_car
-    and x14, x0, #0x00FFFFFFFFFFFFFF 
+    and x14, x0, #0x00FFFFFFFFFFFFFF
 
-    bl alloc_reg            
+    bl alloc_reg
 
     ldr w9, =0xAA0003E0
     lsl w10, w8, #16
     orr w9, w9, w10
     orr w9, w9, w0
-    str w9, [JIT_HEAD], #4  
+    str w9, [JIT_HEAD], #4
 
     mov x9, #TAG_REG
     lsl x9, x9, #56
-    orr x9, x9, x0          
+    orr x9, x9, x0
 
     ldr x13, [sp, #56]      // Load Write Head
-    str x14, [x13], #8      
-    str x9, [x13], #8       
+    str x14, [x13], #8
+    str x9, [x13], #8
     str x13, [sp, #56]      // Save Write Head
 
     add x8, x8, #1
@@ -58,20 +58,20 @@ arg_loop:
     b arg_loop
 
 args_done:
-    ldr x13, [sp, #56]      
+    ldr x13, [sp, #56]
     mov x9, #1
-    str x9, [x13], #8       
-    str x20, [x13], #8      
+    str x9, [x13], #8
+    str x20, [x13], #8
 
     sub x9, x13, NIL_CAR
-    mov DAT_OFF, x9         
+    mov DAT_OFF, x9
 
     mov x0, x19
     bl prim_cdr
-    mov x19, x0             
+    mov x19, x0
 
     // Args list is dead. x22 is safe to hold the New Env Ptr!
-    ldr x22, [sp, #48]      
+    ldr x22, [sp, #48]
 
 compile_loop:
     EXTRACT_OFFSET x9, x19
@@ -173,7 +173,7 @@ handler_sub:
 
     mov x19, x0
     str x1, [sp, #48]
-    
+
     bl prim_car
     ldr x1, [sp, #48]
     bl eval
@@ -218,7 +218,7 @@ handler_if:
     stp x29, x30, [sp, #-64]!
     stp x19, x20, [sp, #16]
     stp x21, x22, [sp, #32]
-    
+
     mov x19, x0
     str x1, [sp, #48]
 
@@ -275,6 +275,72 @@ handler_if:
     str w11, [x22]
 
     mov x0, #(TAG_LIST << 56) // Return NIL
+    ldp x21, x22, [sp, #32]
+    ldp x19, x20, [sp, #16]
+    ldp x29, x30, [sp], #64
+    ret
+
+    // --- handler_def ---
+    // Input: x0 = (symbol expression)
+    .global handler_def
+handler_def:
+    stp x29, x30, [sp, #-64]!    // Allocate 64 bytes for safety!
+    stp x19, x20, [sp, #16]
+    stp x21, x22, [sp, #32]
+
+    mov x19, x0
+    str x1, [sp, #48]       // Save environment safely at #48
+
+    // 1. Extract Symbol
+    bl prim_car
+    and x20, x0, #0x00FFFFFFFFFFFFFF
+
+    // 2. Extract Expression
+    mov x0, x19
+    bl prim_cdr
+    bl prim_car
+
+    // 3. Evaluate Expression
+    ldr x1, [sp, #48]
+    bl eval
+    mov x21, x0
+
+    // 4. Append to Global Environment Chain
+    ldr x9, =env_tail_ptr
+    ldr x10, [x9]
+
+    add x11, NIL_CAR, DAT_OFF
+
+    str x20, [x11, #0]
+    str x21, [x11, #8]
+
+    str xzr, [x11, #16]
+    str xzr, [x11, #24]
+
+    mov x12, #1
+    str x12, [x10, #0]
+    str x11, [x10, #8]
+
+    add x12, x11, #16
+    str x12, [x9]
+
+    add DAT_OFF, DAT_OFF, #32
+
+    // 5. COMMIT THE WATERMARKS!
+    ldr x9, =watermark_dat
+    str DAT_OFF, [x9]
+
+    ldr x9, =watermark_ast
+    str AST_OFF, [x9]
+
+    ldr x9, =watermark_jit
+    sub x10, JIT_HEAD, NIL_CAR
+    str x10, [x9]
+
+    mov x0, #TAG_SYM
+    lsl x0, x0, #56
+    orr x0, x0, x20
+
     ldp x21, x22, [sp, #32]
     ldp x19, x20, [sp, #16]
     ldp x29, x30, [sp], #64

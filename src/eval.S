@@ -5,7 +5,7 @@
 .global eval
 
 // --- eval ---
-// Input: 
+// Input:
 //   x0 = Tagged AST Node (Expression)
 //   x1 = Environment Pointer (e.g., env_root)
 // Output:
@@ -29,12 +29,12 @@ eval_done:
 
 // --- eval_sym ---
 eval_sym:
-    // We branch here from eval, so we need to save the link register 
+    // We branch here from eval, so we need to save the link register
     // because we make a 'bl' call to strcmp inside the loop.
     stp x29, x30, [sp, #-16]!
 
     and x2, x0, #0x00FFFFFFFFFFFFFF // untag symbol
-    
+
     mov x3, x1          // x3 = Current Environment traversal pointer
 
 sym_loop:
@@ -47,7 +47,7 @@ sym_loop:
     // Setup for strcmp: x5 = str1, x6 = str2
     mov x5, x2
     mov x6, x4
-    
+
     // Save volatile registers before calling our internal strcmp
     stp x2, x3, [sp, #-16]!
     bl strcmp
@@ -104,7 +104,7 @@ eval_list:
     stp x29, x30, [sp, #-64]!
     stp x19, x20, [sp, #16]
     stp x21, x22, [sp, #32]
-    
+
     mov x19, x0         // x19 = Current expression list
     mov x20, x1         // x20 = Environment
 
@@ -137,7 +137,7 @@ arg_loop:
     bl prim_car         // Get arg expression
     mov x1, x20         // Environment
     bl eval             // Evaluate arg
-    
+
     // Store evaluated argument into stack array [sp + x22 * 8]
     str x0, [sp, x22, lsl #3]
     add x22, x22, #1
@@ -173,14 +173,14 @@ call_jit:
     // Protect VM context
     stp x27, x28, [sp, #-32]!  // Save NIL_CAR, NIL_CDR
     stp x25, x26, [sp, #16]    // Save DAT_OFF, AST_OFF
-    
+
     // Jump into Native/JIT Code!
-    blr x9              
-    
+    blr x9
+
     // Restore VM context
     ldp x25, x26, [sp, #16]
     ldp x27, x28, [sp], #32
-    
+
 
     // --- TAG CLEANUP (Only runs if x10 == TAG_JIT) ---
     and x0, x0, #0x00FFFFFFFFFFFFFF
