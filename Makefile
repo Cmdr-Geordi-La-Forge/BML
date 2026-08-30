@@ -4,7 +4,7 @@ LD = aarch64-linux-gnu-ld
 ASFLAGS = -g
 LDFLAGS = -nostdlib
 
-SRCS = src/boot.S src/env.S src/prims.S src/eval.S src/parse.S src/jit.S src/print.S
+SRCS = src/boot.S src/env.S src/prims.S src/eval.S src/parse.S src/rat.S src/jit.S src/print.S
 OBJS = $(SRCS:.S=.o)
 TARGET = compiler
 

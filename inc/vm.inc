@@ -5,6 +5,7 @@
     .equ TAG_FUNC,  0x04  // Native AArch64 function pointer
     .equ TAG_MACRO, 0x05  // Context-aware generator (receives raw AST)
     .equ TAG_JIT,   0x06  // JIT-Compiled Function (Needs re-tagging)
+    .equ TAG_REG,   0x07  // Hardware Register (0-31)
     .equ SYS_READ, 63
     .equ SYS_WRITE, 64
     .equ STDIN, 0
